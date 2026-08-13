@@ -28,7 +28,11 @@ sub get_service_status {
 sub get_service_errors {
     my ($svc) = @_;
     my $out = `journalctl -u \Q$svc\E -p err -n 20 --no-pager --output=short 2>/dev/null`;
-    $out =~ s/^\s+|\s+$//g; return $out || '';
+    # Remove journalctl informational lines (-- No entries --, -- Journal begins..., etc.)
+    $out =~ s/^--[^\n]*--\s*\n?//gm;
+    $out =~ s/^--[^\n]*\n?//gm;
+    $out =~ s/^\s+|\s+$//g;
+    return $out || '';
 }
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
@@ -41,58 +45,144 @@ sub get_alerts_detail {
 
 # ── Decisions ─────────────────────────────────────────────────────────────────
 sub get_decisions {
+    my (%opts) = @_;
     my $json = `cscli decisions list -o json 2>/dev/null`;
+    return ([], '') unless $json && $json =~ /\S/;
+    return ([], '') if $json =~ /^\s*null\s*$/;
+
     my $data = load_json($json);
-    if (ref $data eq 'HASH' && ref $data->{rows} eq 'ARRAY') { return $data->{rows}; }
-    return ref $data eq 'ARRAY' ? $data : [];
+    return ([], $json) unless defined $data;
+
+    # cscli decisions list -o json returns ALERT objects, each with a
+    # nested "decisions" array. We flatten them out, merging alert-level
+    # fields (source IP, scenario, machine_id) with decision-level fields
+    # (type, duration, origin, scope, value, id).
+    my @flat;
+
+    my $alert_list;
+    if    (ref $data eq 'ARRAY')                                      { $alert_list = $data; }
+    elsif (ref $data eq 'HASH' && ref $data->{rows}  eq 'ARRAY')     { $alert_list = $data->{rows}; }
+    elsif (ref $data eq 'HASH' && ref $data->{items} eq 'ARRAY')     { $alert_list = $data->{items}; }
+    else  { $alert_list = []; }
+
+    for my $alert (@$alert_list) {
+        next unless ref $alert eq 'HASH';
+
+        # Alert-level context
+        my $scenario   = $alert->{scenario}   // '';
+        my $machine_id = $alert->{machine_id} // '';
+        my $start_at   = $alert->{start_at}   // '';
+        my $src_ip     = $alert->{source}{ip} // $alert->{source}{value} // '';
+        my $src_asn    = $alert->{source}{as_name} // $alert->{source}{as_number} // '';
+        my $src_cn     = $alert->{source}{cn} // '';
+
+        # Each alert can have multiple decisions
+        my $decisions = $alert->{decisions} // [];
+        $decisions = [$decisions] if ref $decisions eq 'HASH'; # defensive
+
+        for my $d (@$decisions) {
+            next unless ref $d eq 'HASH';
+            push @flat, {
+                # Decision fields
+                id       => $d->{id}       // '',
+                type     => $d->{type}     // 'ban',
+                origin   => $d->{origin}   // '',
+                scope    => $d->{scope}    // 'Ip',
+                value    => $d->{value}    // $src_ip,   # IP from decision or alert source
+                duration => $d->{duration} // '',
+                scenario => $d->{scenario} // $scenario, # decision scenario or alert scenario
+                simulated=> $d->{simulated}// 0,
+                # Alert context for display
+                src_asn  => $src_asn,
+                src_cn   => $src_cn,
+                machine_id => $machine_id,
+                start_at   => $start_at,
+            };
+        }
+    }
+
+    return (\@flat, $json);
 }
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
 sub parse_bouncer_metrics {
-    # Try multiple cscli metrics formats across versions
-    my $json = `cscli metrics -o json 2>/dev/null`;
-    my $data = load_json($json);
-    my %totals = (bytes => 0, packets => 0, requests => 0);
+    my %totals = (bytes => 0, packets => 0, active_decisions => 0);
 
-    if (ref $data eq 'HASH') {
-        # Format 1: {bouncers: {name: {dropped_bytes, dropped_packets}}}
-        if (ref $data->{bouncers} eq 'HASH') {
+    # ── Primary: cscli metrics show bouncers -o json ──────────────────────────
+    # Structure (confirmed from diagnostics):
+    # { "bouncers": { "bouncer-name": {
+    #     "CAPI":    { "dropped": { "byte": N, "packet": N }, "active_decisions": {"ip": N} },
+    #     "crowdsec":{ "dropped": { "byte": N, "packet": N }, "active_decisions": {"ip": N} },
+    #     "cscli":   { "dropped": { "byte": N, "packet": N } },
+    #     "":        { "processed": { "byte": N, "packet": N } }
+    # } } }
+    my $json = `cscli metrics show bouncers -o json 2>/dev/null`;
+    if ($json && $json =~ /^\s*\{/) {
+        my $data = load_json($json);
+        if (ref $data eq 'HASH' && ref $data->{bouncers} eq 'HASH') {
+            for my $bname (keys %{$data->{bouncers}}) {
+                my $b = $data->{bouncers}{$bname};
+                next unless ref $b eq 'HASH';
+                # Sum dropped bytes/packets across all origin keys (CAPI, crowdsec, cscli, etc.)
+                for my $origin (keys %$b) {
+                    my $od = $b->{$origin};
+                    next unless ref $od eq 'HASH';
+                    if (ref $od->{dropped} eq 'HASH') {
+                        $totals{bytes}   += $od->{dropped}{byte}   || 0;
+                        $totals{packets} += $od->{dropped}{packet} || 0;
+                    }
+                    if (ref $od->{active_decisions} eq 'HASH') {
+                        $totals{active_decisions} += $od->{active_decisions}{ip} || 0;
+                    }
+                }
+            }
+            return \%totals;
+        }
+    }
+
+    # ── Fallback: cscli metrics -o json (older CrowdSec versions) ─────────────
+    $json = `cscli metrics -o json 2>/dev/null`;
+    if ($json && $json =~ /^\s*[\[\{]/) {
+        my $data = load_json($json);
+        if (ref $data eq 'HASH' && ref $data->{bouncers} eq 'HASH') {
             for my $b (values %{$data->{bouncers}}) {
-                $totals{bytes}    += $b->{dropped_bytes}   || $b->{bytes_written}   || 0;
-                $totals{packets}  += $b->{dropped_packets} || $b->{packets_written} || 0;
-                $totals{requests} += $b->{requests_count}  || $b->{req_processed}   || 0;
+                next unless ref $b eq 'HASH';
+                $totals{bytes}   += $b->{dropped_bytes}   || 0;
+                $totals{packets} += $b->{dropped_packets} || 0;
             }
-        }
-        # Format 2: {remediation_components: [...]}
-        if (ref $data->{remediation_components} eq 'ARRAY') {
-            for my $b (@{$data->{remediation_components}}) {
-                $totals{bytes}    += $b->{dropped_bytes}   || 0;
-                $totals{packets}  += $b->{dropped_packets} || 0;
-                $totals{requests} += $b->{requests_count}  || 0;
-            }
-        }
-    }
-    # Format 3: array of bouncer objects
-    elsif (ref $data eq 'ARRAY') {
-        for my $b (@$data) {
-            $totals{bytes}    += $b->{dropped_bytes}   || 0;
-            $totals{packets}  += $b->{dropped_packets} || 0;
-            $totals{requests} += $b->{requests_count}  || 0;
         }
     }
 
-    # If still zero, try cscli bouncers list which has metrics in some versions
-    if ($totals{bytes} == 0 && $totals{packets} == 0) {
-        my $bjson = `cscli bouncers list -o json 2>/dev/null`;
-        my $bdata = load_json($bjson);
-        if (ref $bdata eq 'ARRAY') {
-            for my $b (@$bdata) {
-                $totals{bytes}    += $b->{dropped_bytes}   || $b->{bytes_dropped}   || 0;
-                $totals{packets}  += $b->{dropped_packets} || $b->{packets_dropped} || 0;
+    return \%totals;
+}
+
+# ── Per-origin breakdown for Remediation Metrics page ────────────────────────
+sub parse_bouncer_metrics_by_origin {
+    my %by_origin;  # { CAPI => {bytes=>N, packets=>N, decisions=>N}, crowdsec => {...} }
+
+    my $json = `cscli metrics show bouncers -o json 2>/dev/null`;
+    return \%by_origin unless $json && $json =~ /^\s*\{/;
+    my $data = load_json($json);
+    return \%by_origin unless ref $data eq 'HASH' && ref $data->{bouncers} eq 'HASH';
+
+    for my $bname (keys %{$data->{bouncers}}) {
+        my $b = $data->{bouncers}{$bname};
+        next unless ref $b eq 'HASH';
+        for my $origin (keys %$b) {
+            next if $origin eq '';  # processed totals, not dropped
+            my $od = $b->{$origin};
+            next unless ref $od eq 'HASH';
+            $by_origin{$origin} //= {bytes => 0, packets => 0, decisions => 0};
+            if (ref $od->{dropped} eq 'HASH') {
+                $by_origin{$origin}{bytes}   += $od->{dropped}{byte}   || 0;
+                $by_origin{$origin}{packets} += $od->{dropped}{packet} || 0;
+            }
+            if (ref $od->{active_decisions} eq 'HASH') {
+                $by_origin{$origin}{decisions} += $od->{active_decisions}{ip} || 0;
             }
         }
     }
-    return \%totals;
+    return \%by_origin;
 }
 
 # ── Scenario counts ───────────────────────────────────────────────────────────
@@ -131,11 +221,18 @@ sub get_timeline_json {
 
 sub _alert_field {
     my ($a, $field) = @_;
-    return $a->{source}{ip}      // '-'  if $field eq 'src_ip';
-    return $a->{scenario}        // '-'  if $field eq 'scenario';
-    # engine: alerts use 'machine_id' (snake_case)
-    return $a->{machine_id}      // $a->{machineId} // '-' if $field eq 'engine';
-    # ASN: prefer name, fall back to number
+    if ($field eq 'src_ip') {
+        # Only return a plain IP address — ranges don't belong in the IP chart
+        my $ip = $a->{source}{ip} // '';
+        return $ip if $ip =~ /^\d+\.\d+\.\d+\.\d+$/;
+        # For range-type alerts, show the range value so it appears somewhere
+        my $val = $a->{source}{value} // '';
+        return $val if $val =~ /^\d+\.\d+\.\d+\.\d+\/\d+$/;
+        return '-';
+    }
+    return $a->{scenario}                           // '-'  if $field eq 'scenario';
+    return $a->{machine_id} // $a->{machineId}      // '-'  if $field eq 'engine';
+    # ASN
     return $a->{source}{as_name} || $a->{source}{as_number} || '-unresolved AS-';
 }
 
@@ -147,8 +244,11 @@ sub get_top_n {
         my $k = _alert_field($a, $field);
         $counts{$k}++ if $k && $k ne '-';
     }
+    my $total = 0;
+    $total += $_ for values %counts;
     my @sorted = sort { $counts{$b} <=> $counts{$a} } keys %counts;
-    return [ map { { label => $_, count => $counts{$_} } } @sorted[0..$n-1] ];
+    my $list = [ map { { label => $_, count => $counts{$_} } } @sorted[0..$n-1] ];
+    return wantarray ? ($list, $total, scalar keys %counts) : $list;
 }
 
 # ── Engine info ───────────────────────────────────────────────────────────────
@@ -372,20 +472,23 @@ sub ip_in_cidrs {
     return 0;
 }
 
-# Filter an alerts array, removing any alert whose source IP is in @exclude_cidrs.
-# Also excludes alerts where source value (for ranges) starts with an excluded prefix.
+# Filter an alerts array, removing alerts whose source IP is in @exclude_cidrs.
 sub filter_alerts {
     my ($alerts, @exclude_cidrs) = @_;
     return $alerts unless @exclude_cidrs;
+
+    # Safety: validate that every CIDR is sane before filtering anything
+    my @valid_cidrs = grep { /^\d+\.\d+\.\d+\.\d+(\/\d+)?$/ } @exclude_cidrs;
+    return $alerts unless @valid_cidrs;
+
     my @out;
     for my $a (@$alerts) {
         my $ip  = $a->{source}{ip}    // '';
         my $val = $a->{source}{value} // $ip;
-        # Check plain IP
-        next if $ip  && ip_in_cidrs($ip,  @exclude_cidrs);
-        # Check range-type alerts (value = "1.2.3.0/24")
+        # Only exclude if IP explicitly matches a test range
+        next if $ip  && ip_in_cidrs($ip,  @valid_cidrs);
         if ($val =~ m{^(\d+\.\d+\.\d+\.\d+)(?:/\d+)?$}) {
-            next if ip_in_cidrs($1, @exclude_cidrs);
+            next if ip_in_cidrs($1, @valid_cidrs);
         }
         push @out, $a;
     }
@@ -394,3 +497,39 @@ sub filter_alerts {
 
 # The two test ranges for earth.gnos1s.com
 our @TEST_IP_RANGES = ('1.2.3.0/24', '192.0.2.0/24');
+
+# ── Config via Webmin's native %config (populated by init_config in web-lib.pl) ─
+# Saved with save_module_config() in config.cgi → /etc/webmin/crowdsec/config
+
+# ── Config via Webmin's module config API ─────────────────────────────────────
+# get_module_config() reads /etc/webmin/crowdsec/config reliably in all contexts
+
+sub get_test_ip_ranges {
+    my $ranges = $config{test_ip_ranges};
+    if (!defined $ranges || $ranges eq '') {
+        my %mc = &get_module_config();
+        $ranges = $mc{test_ip_ranges};
+    }
+    $ranges //= '1.2.3.0/24 192.0.2.0/24';
+    # Type 9 (multiline textarea) stores newlines as spaces
+    # Handle all separator formats
+    $ranges =~ s/\\n/ /g;
+    $ranges =~ s/,/ /g;
+    $ranges =~ s/\n/ /g;
+    return grep { /^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/ }
+           grep { /\S/ }
+           split /\s+/, $ranges;
+}
+
+sub get_exclude_by_default {
+    my $val = $config{exclude_by_default};
+    if (!defined $val) {
+        my %mc = &get_module_config();
+        $val = $mc{exclude_by_default};
+    }
+    # Handle Yes/No strings (from config.info type 1) as well as 1/0
+    return 0 unless defined $val;
+    return 0 if $val eq '0' || lc($val) eq 'no';
+    return 1 if $val eq '1' || lc($val) eq 'yes';
+    return $val ? 1 : 0;
+}

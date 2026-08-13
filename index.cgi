@@ -4,10 +4,17 @@
 require './crowdsec-lib.pl';
 
 &ReadParse();
+my $tab          = $in{'tab'} || 'engines';
 
-my $tab          = $in{'tab'}          || 'engines';
-my $exclude_test = $in{'exclude_test'} ? 1 : 0;
-my $qs_filter    = $exclude_test ? '&exclude_test=1' : '';  # append to all tab links
+# Load config — determines defaults and test IP ranges
+my @test_ranges = get_test_ip_ranges();
+# Note: if @test_ranges is empty, filter_alerts will be a no-op
+
+# exclude_test: URL param overrides config default (allows per-session toggle)
+my $exclude_test = exists $in{'exclude_test'}
+    ? ($in{'exclude_test'} ? 1 : 0)
+    : get_exclude_by_default();
+my $qs_filter    = $exclude_test ? '&exclude_test=1' : '&exclude_test=0';
 
 &ui_print_header(undef, "CrowdSec Security Engine", "", undef, 1, 1);
 
@@ -15,14 +22,16 @@ my $qs_filter    = $exclude_test ? '&exclude_test=1' : '';  # append to all tab 
 my $alerts_raw = get_alerts_detail('24h');
 # Apply test-IP filter if checkbox is on
 my $alerts = $exclude_test
-    ? filter_alerts($alerts_raw, @TEST_IP_RANGES)
+    ? filter_alerts($alerts_raw, @test_ranges)
     : $alerts_raw;
 my $filtered_count = scalar(@$alerts_raw) - scalar(@$alerts);
-my $decisions = get_decisions();
+my ($decisions, $decisions_raw_json) = get_decisions();
+
 my $engines   = get_engine_info();
 my $bouncers  = get_bouncers();
 my $hub       = get_hub_counts();
 my $metrics   = parse_bouncer_metrics();
+my $metrics_by_origin = parse_bouncer_metrics_by_origin();
 my $cs_status = get_service_status('crowdsec');
 my $cb_status = get_service_status('crowdsec-firewall-bouncer');
 my $cs_err    = get_service_errors('crowdsec');
@@ -36,11 +45,17 @@ my $dec_cnt   = scalar @$decisions;
 my $sc_counts = get_scenario_counts($alerts);
 my @sc_sorted = sort { $sc_counts->{$b} <=> $sc_counts->{$a} } keys %$sc_counts;
 
-# Visualizer data
-my $top_ips  = get_top_n($alerts, 'src_ip',   3);
-my $top_as   = get_top_n($alerts, 'src_as',   3);
-my $top_eng  = get_top_n($alerts, 'engine',   3);
-my $top_sc   = get_top_n($alerts, 'scenario', 3);
+# Visualizer data — capture list, total hits, and unique count
+my ($top_ips, $ip_total,  $ip_uniq)  = get_top_n($alerts, 'src_ip',   3);
+my ($top_as,  $as_total,  $as_uniq)  = get_top_n($alerts, 'src_as',   3);
+my ($top_eng, $eng_total, $eng_uniq) = get_top_n($alerts, 'engine',   3);
+my ($top_sc,  $sc_total,  $sc_uniq)  = get_top_n($alerts, 'scenario', 3);
+
+# Expanded lists — all entries (no top-N cutoff)
+my ($exp_ips) = get_top_n($alerts, 'src_ip',   999);
+my ($exp_as)  = get_top_n($alerts, 'src_as',   999);
+my ($exp_eng) = get_top_n($alerts, 'engine',   999);
+my ($exp_sc)  = get_top_n($alerts, 'scenario', 999);
 
 # Generate SVG sparklines directly in Perl - no JS canvas timing issues
 my ($tl_ip_s1,  $tl_ip_s2)  = get_timeline_data($alerts, 'src_ip');
@@ -173,7 +188,7 @@ body::before{content:'';position:fixed;inset:0;
 .content{padding:24px 28px;max-width:1400px}
 
 /* ── Stat cards ── */
-.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:24px}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:24px;margin-top:4px}
 .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px}
 .stat-card .label{font-size:11px;color:#8b949e;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
 .stat-card .value{font-size:30px;font-weight:700;font-family:var(--mono);line-height:1;color:#e6edf3}
@@ -225,6 +240,7 @@ body::before{content:'';position:fixed;inset:0;
 .r1{background:rgba(108,99,255,.25);color:var(--accent);border:1px solid rgba(108,99,255,.4)}
 .r2{background:rgba(245,166,35,.2);color:var(--accent2);border:1px solid rgba(245,166,35,.35)}
 .r3{background:rgba(139,148,158,.15);color:var(--text3);border:1px solid var(--border)}
+.r4{background:transparent;color:var(--text3);border:1px solid var(--border)}
 .ranked-label{font-family:var(--mono);font-size:11px;flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ranked-count{font-family:var(--mono);font-size:10px;color:var(--text3);
   background:var(--bg);padding:2px 6px;border-radius:4px;flex-shrink:0}
@@ -253,6 +269,10 @@ body::before{content:'';position:fixed;inset:0;
 /* ── Decision duration colouring ── */
 .dur-urgent{color:var(--warning)}
 .dur-ok{color:var(--text2)}
+
+/* ── Service control buttons — Stop is neutral not red (not a destructive action warning) ── */
+.btn-stop-svc{background:var(--surface2);color:#8b949e;border:1px solid var(--border2)}
+.btn-stop-svc:hover{border-color:#6e7681;color:var(--text)}
 
 /* ── Error box ── */
 .err-box{background:rgba(255,92,92,.07);border:1px solid rgba(255,92,92,.2);
@@ -360,15 +380,12 @@ print <<HTML;
   </div>
   <div class="sb-section">
     <div class="sb-label">Manage</div>
-    <a class="sb-item @{[$tab eq 'bouncers'  ? 'active' : '']}" href="index.cgi?tab=bouncers$qs_filter">
-      <span class="ico">🔥</span> Bouncers
+    <a class="sb-item @{[$tab eq 'bouncers' || $tab eq 'services' ? 'active' : '']}" href="index.cgi?tab=bouncers$qs_filter">
+      <span class="ico">🔧</span> Services &amp; Bouncers
       <span class="badge">@{[scalar @$bouncers]}</span>
     </a>
     <a class="sb-item @{[$tab eq 'hub'       ? 'active' : '']}" href="index.cgi?tab=hub$qs_filter">
       <span class="ico">📦</span> Hub
-    </a>
-    <a class="sb-item @{[$tab eq 'services'  ? 'active' : '']}" href="index.cgi?tab=services$qs_filter">
-      <span class="ico">🔧</span> Services
     </a>
   </div>
   <div class="sb-svc">
@@ -396,14 +413,17 @@ sub render_topbar {
     my $active_cls  = $exclude_test ? 'active' : '';
     my $sub_html    = $subtitle ? qq( <span style="font-size:13px;font-weight:400;color:#6e7681">· $subtitle</span>) : '';
     my $badge_html  = '';
+    my $ranges_tip  = @test_ranges ? join(', ', @test_ranges) : 'none configured';
     if ($exclude_test && $filtered_count > 0) {
         $badge_html = qq( <span class="filter-badge">⚠ $filtered_count test alerts excluded</span>);
+    } elsif ($exclude_test && @test_ranges == 0) {
+        $badge_html = qq( <span class="filter-badge" style="background:rgba(255,92,92,.1);color:#ff9090;border-color:rgba(255,92,92,.25)">⚠ No ranges configured</span>);
     }
     return <<HTML;
 <div class="topbar">
   <div class="page-title"><span class="ico">$icon</span> $title$sub_html$badge_html</div>
   <div class="topbar-right">
-    <a href="$toggle_url" class="test-filter $active_cls" title="Exclude 1.2.3.0/24 and 192.0.2.0/24 test ranges">
+    <a href="$toggle_url" class="test-filter $active_cls" title="Ranges: $ranges_tip">
       <span class="tf-dot"></span>Exclude test IPs
     </a>
     <a href="$refresh_url" class="btn btn-ghost btn-sm">↺ Refresh</a>
@@ -416,11 +436,10 @@ HTML
 # TAB: ENGINES
 # ─────────────────────────────────────────────────────────────────────────────
 if ($tab eq 'engines') {
-    print <<HTML;
-<div class="content">
-HTML
 
     print render_topbar("⚙️", "Engines", "", "engines");
+
+    print '<div class="content">';
 
     # Stat row — use local service status for "active" count, not CAPI isOnline
     my $online  = ($cs_status eq 'active') ? scalar(@$engines) : 0;
@@ -550,21 +569,24 @@ HTML
 # ─────────────────────────────────────────────────────────────────────────────
 elsif ($tab eq 'alerts') {
 
-    # Build ranked list HTML helper
+    # Build ranked list HTML helper — max=0 means show all
     sub ranked_html {
-        my ($items) = @_;
+        my ($items, $max) = @_;
+        $max //= 3;
         my $html = '<ul class="ranked-list">';
         my $r = 1;
         for my $it (@$items) {
-            next unless defined $it->{label} && $it->{label} ne '';
-            my $cls = "r$r";
+            next unless defined $it->{label} && $it->{label} ne '' && $it->{label} ne '-';
+            my $n = $r <= 3 ? $r : 4;  # only 3 badge styles, rest use r4 = plain
+            my $cls = "r$n";
             my $lbl = html_escape($it->{label});
             $html .= qq(<li class="ranked-item">
               <span class="rank-badge $cls">$r</span>
               <span class="ranked-label" title="$lbl">$lbl</span>
               <span class="ranked-count">x $it->{count}</span>
             </li>);
-            last if $r++ >= 3;
+            last if $max > 0 && $r++ >= $max;
+            $r++ if $max == 0;
         }
         $html .= '</ul>';
         return $html;
@@ -575,12 +597,14 @@ elsif ($tab eq 'alerts') {
     my $eng_list = ranked_html($top_eng);
     my $sc_list  = ranked_html($top_sc);
 
-    print <<HTML;
-HTML
+    # Expanded lists — all entries
+    my $ip_list_exp  = ranked_html($exp_ips,  0);
+    my $as_list_exp  = ranked_html($exp_as,   0);
+    my $eng_list_exp = ranked_html($exp_eng,  0);
+    my $sc_list_exp  = ranked_html($exp_sc,   0);
+
 print render_topbar("🔔", "Alerts", "Last 24h", "alerts");
-print <<HTML;
-<div class="content">
-HTML
+print '<div class="content">';
 
     # Quota-style banner
     print <<HTML;
@@ -609,28 +633,32 @@ HTML
     <div class="card-body" id="viz-body">
       <div class="viz-grid">
         <div class="viz-card">
-          <div class="viz-card-title">Source IP</div>
+          <div class="viz-card-title">Source IP <span style="font-weight:400;color:#6e7681;font-size:10px">$ip_total hits · $ip_uniq unique</span></div>
           <div class="chart-wrap">$svg_ip</div>
-          $ip_list
+          <div class="viz-summary">$ip_list</div>
+          <div class="viz-expanded" style="display:none">$ip_list_exp</div>
         </div>
         <div class="viz-card" style="position:relative">
-          <div class="viz-card-title">Source ASs</div>
+          <div class="viz-card-title">Source ASs <span style="font-weight:400;color:#6e7681;font-size:10px">$as_total hits · $as_uniq unique</span></div>
           <div class="chart-wrap">$svg_as</div>
-          $as_list
+          <div class="viz-summary">$as_list</div>
+          <div class="viz-expanded" style="display:none">$as_list_exp</div>
           <div class="tooltip-box" id="eng-tip">
             <div class="tb-row"><span class="tb-label">Security Engine name: </span><span class="tb-val">$eng_name</span></div>
             <div class="tb-row"><span class="tb-label">Security Engine ID: </span><span class="tb-val" style="word-break:break-all">$eng_id</span></div>
           </div>
         </div>
         <div class="viz-card">
-          <div class="viz-card-title">Targeted Security Engines</div>
+          <div class="viz-card-title">Targeted Security Engines <span style="font-weight:400;color:#6e7681;font-size:10px">$eng_total hits</span></div>
           <div class="chart-wrap">$svg_eng</div>
-          $eng_list
+          <div class="viz-summary">$eng_list</div>
+          <div class="viz-expanded" style="display:none">$eng_list_exp</div>
         </div>
         <div class="viz-card">
-          <div class="viz-card-title">Scenarios</div>
+          <div class="viz-card-title">Scenarios <span style="font-weight:400;color:#6e7681;font-size:10px">$sc_total hits · $sc_uniq triggered</span></div>
           <div class="chart-wrap">$svg_sc</div>
-          $sc_list
+          <div class="viz-summary">$sc_list</div>
+          <div class="viz-expanded" style="display:none">$sc_list_exp</div>
         </div>
       </div>
     </div>
@@ -685,54 +713,118 @@ HTML
 # TAB: DECISIONS
 # ─────────────────────────────────────────────────────────────────────────────
 elsif ($tab eq 'decisions') {
+
+    # Count by origin so we can explain what each group means
+    my ($local_cnt, $capi_cnt, $cscli_cnt) = (0, 0, 0);
+    for my $d (@$decisions) {
+        my $orig = lc($d->{origin} // $d->{Origin} // '');
+        if    ($orig eq 'crowdsec') { $local_cnt++; }
+        elsif ($orig eq 'capi')     { $capi_cnt++;  }
+        elsif ($orig eq 'cscli')    { $cscli_cnt++; }
+    }
+
+    print render_topbar("🚫", "Decisions", "", "decisions");
+    print '<div class="content">';
+
+    # Explanation banner
     print <<HTML;
-HTML
-print render_topbar("🚫", "Decisions", "", "decisions");
-print <<HTML;
-<div class="content">
-  <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px">
-    <div class="stat-card danger"><div class="label">Active Decisions</div>
-      <div class="value">$dec_cnt</div></div>
-    <div class="stat-card"><div class="label">Bans</div>
-      <div class="value" id="ban-count">—</div></div>
-    <div class="stat-card"><div class="label">Captchas</div>
-      <div class="value" id="captcha-count">—</div></div>
+  <div style="background:rgba(108,99,255,0.07);border:1px solid rgba(108,99,255,0.2);
+    border-radius:10px;padding:16px 20px;margin-bottom:20px;font-size:13px;color:#8b949e;line-height:1.7">
+    <strong style="color:#e6edf3">What are decisions?</strong>
+    When CrowdSec detects an attack it creates a decision — a concrete instruction to ban that IP.
+    Decisions come from two sources:
+    <strong style="color:#a99cff">CAPI</strong> (the global CrowdSec community blocklist, with $capi_cnt shown here — use <code style="font-size:11px;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:3px;color:#e6edf3">cscli decisions list --all</code> for the full 30k+ list)
+    and your <strong style="color:#3dd68c">local engine</strong> ($local_cnt active bans from your own server's detections).
+    <br><br>
+    <strong style="color:#e6edf3">Why are there fewer decisions than alerts?</strong>
+    Alerts are detections — each time an attack pattern is matched.
+    A decision (ban) may expire before you check this page, or multiple alerts from the same IP
+    only create one active decision. Bans are temporary by default (hours to days).
   </div>
+HTML
+
+    # Stat cards
+    print <<HTML;
+  <div class="stat-grid" style="grid-template-columns:repeat(4,1fr);margin-bottom:20px">
+    <div class="stat-card accent"><div class="label">Total Active</div>
+      <div class="value">$dec_cnt</div><div class="sub">IPs currently banned</div></div>
+    <div class="stat-card"><div class="label">CAPI Community</div>
+      <div class="value" style="color:#a99cff">$capi_cnt</div>
+      <div class="sub">Global blocklist</div></div>
+    <div class="stat-card"><div class="label">Local Engine</div>
+      <div class="value" style="color:#3dd68c">$local_cnt</div>
+      <div class="sub">Your detections</div></div>
+    <div class="stat-card"><div class="label">Manual (cscli)</div>
+      <div class="value">$cscli_cnt</div>
+      <div class="sub">Added by hand</div></div>
+  </div>
+HTML
+
+    # Decisions table
+    print <<HTML;
   <div class="card">
     <div class="card-header">
-      <div class="card-title">🚫 Active Bans &amp; Decisions</div>
-      <span style="font-size:11px;color:var(--text3)">$dec_cnt decisions displayed</span>
+      <div class="card-title">Active Ban List</div>
+      <span style="font-size:11px;color:#6e7681">$dec_cnt decisions · firewall rules currently enforced</span>
     </div>
     <div class="card-body no-pad">
 HTML
     if (@$decisions) {
         print '<table class="tbl"><thead><tr>
-          <th>IP Address</th><th>Type</th><th>Engine</th><th>Duration</th><th>Scenario</th><th>Action</th>
+          <th>Banned IP / Range</th><th>Origin</th><th>Reason / Scenario</th><th>Expires in</th><th></th>
         </tr></thead><tbody>';
+
         for my $d (@$decisions) {
-            my $ip       = html_escape($d->{value}        // $d->{ip}      // '-');
-            my $type     = html_escape($d->{type}         // 'ban');
-            my $origin   = html_escape($d->{origin}       // '-');
-            my $scenario = html_escape($d->{scenario}     // '-');
-            my $duration = html_escape($d->{duration}     // '-');
-            my $id       = html_escape($d->{id}           // '');
-            my $type_cls = $type eq 'ban' ? 'ban' : 'captcha';
-            # Highlight short durations in warning colour
-            my $dur_cls  = ($duration =~ /^\d+m/ && $duration =~ /^(\d+)m/ && $1 < 60)
-                           ? 'dur-urgent' : 'dur-ok';
+            # Fields now come pre-flattened from get_decisions()
+            my $ip       = html_escape($d->{value}    // '-');
+            my $scope    = lc($d->{scope}   // 'ip');
+            my $origin   = $d->{origin}     // '-';
+            my $scenario = html_escape($d->{scenario} // '-');
+            my $duration = html_escape($d->{duration} // '-');
+            my $id       = html_escape($d->{id}       // '');
+            my $asn      = html_escape($d->{src_asn}  // '');
+            my $cn       = html_escape($d->{src_cn}   // '');
+            my $sim      = $d->{simulated}  ? 1 : 0;
+
+            # Origin label + colour
+            my ($orig_label, $orig_style);
+            if    (lc($origin) eq 'capi')     { $orig_label='CAPI';   $orig_style='color:#a99cff'; }
+            elsif (lc($origin) eq 'crowdsec') { $orig_label='Local';  $orig_style='color:#3dd68c'; }
+            elsif (lc($origin) eq 'cscli')    { $orig_label='Manual'; $orig_style='color:#f5a623'; }
+            else                              { $orig_label=html_escape($origin); $orig_style='color:#8b949e'; }
+
+            # Scope badge for ranges
+            my $scope_badge = ($scope eq 'range' || $ip =~ /\/\d+$/)
+                ? ' <span style="font-size:9px;background:rgba(108,99,255,.15);color:#a99cff;padding:1px 5px;border-radius:3px;margin-left:4px">range</span>'
+                : '';
+
+            # Simulated badge
+            my $sim_badge = $sim
+                ? ' <span style="font-size:9px;background:rgba(245,166,35,.15);color:#f5a623;padding:1px 5px;border-radius:3px;margin-left:4px">simulated</span>'
+                : '';
+
+            # Duration colour — amber when expiring soon
+            my $dur_style = 'color:#8b949e';
+            if ($duration =~ /^(\d+)h/ && $1 <= 1) { $dur_style = 'color:#f5a623'; }
+            if ($duration =~ /^(\d+)m/)             { $dur_style = 'color:#f5a623'; }
+
+            # ASN/country subtitle under IP
+            my $ip_sub = '';
+            $ip_sub = join(' ', grep {$_} ($asn, $cn));
+            $ip_sub = $ip_sub ? qq(<br><span style="font-size:10px;color:#6e7681;font-weight:400">$ip_sub</span>) : '';
+
             print <<HTML;
 <tr>
-  <td class="mono">$ip</td>
-  <td><span class="tag $type_cls">$type</span></td>
-  <td class="mono" style="font-size:11px">$origin</td>
-  <td class="mono $dur_cls">$duration</td>
-  <td><span class="tag scenario">$scenario</span></td>
+  <td class="mono" style="font-weight:600;line-height:1.4">$ip$scope_badge$sim_badge$ip_sub</td>
+  <td style="font-size:12px;font-weight:600;$orig_style">$orig_label</td>
+  <td style="font-size:11px;color:#8b949e;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="$scenario">$scenario</td>
+  <td class="mono" style="font-size:11px;$dur_style">$duration</td>
   <td>
-    <form method="post" action="action.cgi">
+    <form method="post" action="action.cgi" style="display:inline">
       <input type="hidden" name="action" value="delete_decision">
       <input type="hidden" name="id" value="$id">
       <button class="btn btn-danger btn-sm" type="submit"
-        onclick="return confirm('Delete decision for $ip?')">🗑 Delete</button>
+        onclick="return confirm('Unban $ip?')">🗑 Unban</button>
     </form>
   </td>
 </tr>
@@ -740,37 +832,33 @@ HTML
         }
         print '</tbody></table>';
     } else {
-        print '<div class="no-data">✓ No active decisions</div>';
+        print '<div class="no-data">✓ No active decisions — no IPs are currently banned by your engine</div>';
     }
-    print '</div></div>'; # card + card-body
+    print '</div></div>'; # card
     print '</div>'; # content
-
-    # Count bans/captchas via JS
-    print <<'HTML';
-<script>
-document.addEventListener('DOMContentLoaded', () => {
-  const rows = document.querySelectorAll('.tbl tbody tr');
-  let bans = 0, captchas = 0;
-  rows.forEach(r => {
-    const type = r.querySelector('.tag')?.textContent?.trim();
-    if (type === 'ban') bans++;
-    else captchas++;
-  });
-  document.getElementById('ban-count').textContent = bans;
-  document.getElementById('captcha-count').textContent = captchas;
-});
-</script>
-HTML
 }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # TAB: REMEDIATION METRICS
 # ─────────────────────────────────────────────────────────────────────────────
 elsif ($tab eq 'metrics') {
     my $bytes_dropped    = fmt_bytes($metrics->{bytes}   || 0);
     my $packets_dropped  = fmt_num($metrics->{packets}   || 0) . ' packets';
-    my $requests_dropped = ($metrics->{requests} || 0)  . ' requests';
+    my $active_decisions = $metrics->{active_decisions}  || 0;
+
+    # Per-origin breakdown (CAPI, crowdsec engine, cscli)
+    my $capi_bytes    = fmt_bytes($metrics_by_origin->{CAPI}{bytes}      || 0);
+    my $capi_packets  = $metrics_by_origin->{CAPI}{packets}              || 0;
+    my $capi_dec      = $metrics_by_origin->{CAPI}{decisions}            || 0;
+    my $eng_bytes     = fmt_bytes($metrics_by_origin->{crowdsec}{bytes}  || 0);
+    my $eng_packets   = $metrics_by_origin->{crowdsec}{packets}          || 0;
+    my $eng_dec       = $metrics_by_origin->{crowdsec}{decisions}        || 0;
+
+    # Percentages
+    my $total_b = ($metrics->{bytes} || 0);
+    my $capi_b_raw = $metrics_by_origin->{CAPI}{bytes}     || 0;
+    my $eng_b_raw  = $metrics_by_origin->{crowdsec}{bytes} || 0;
+    my $capi_pct = $total_b > 0 ? sprintf("%.1f", $capi_b_raw / $total_b * 100) : '0.0';
+    my $eng_pct  = $total_b > 0 ? sprintf("%.1f", $eng_b_raw  / $total_b * 100) : '0.0';
 
     # ── Per-day alert bucketing (last 7 days) ─────────────────────────────────
     my @day_labels;
@@ -847,8 +935,8 @@ elsif ($tab eq 'metrics') {
     print <<HTML;
 HTML
 print render_topbar("📊", "Remediation Metrics", "", "metrics");
+print '<div class="content">';
 print <<HTML;
-<div class="content">
   <p style="font-size:12px;color:var(--text3);margin-bottom:24px">
     See how CrowdSec protects your infrastructure by blocking malicious traffic.
     Track dropped packets and requests to measure the impact of your security policies.
@@ -890,8 +978,8 @@ print <<HTML;
           <div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--accent)">$packets_dropped</div>
         </div>
         <div style="padding:16px 20px">
-          <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Requests dropped</div>
-          <div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--accent)">$requests_dropped</div>
+          <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Active decisions</div>
+          <div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--accent)">$active_decisions</div>
         </div>
       </div>
       <!-- Traffic bar chart (daily alert proxy) -->
@@ -912,31 +1000,31 @@ print <<HTML;
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:20px">
         <div style="padding:16px 20px;border-right:1px solid var(--border)">
           <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Outgoing traffic dropped</div>
-          <div style="font-size:22px;font-weight:700;font-family:var(--mono)">@{[fmt_bytes(($metrics->{bytes}||0) * 85)]}</div>
+          <div style="font-size:22px;font-weight:700;font-family:var(--mono)">$bytes_dropped</div>
         </div>
         <div style="padding:16px 20px">
-          <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Log lines saved</div>
-          <div style="font-size:22px;font-weight:700;font-family:var(--mono)">@{[fmt_num(($metrics->{packets}||0))]} lines</div>
+          <div style="font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Packets dropped</div>
+          <div style="font-size:22px;font-weight:700;font-family:var(--mono)">$packets_dropped</div>
         </div>
       </div>
       <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between">
         <div>
           <div style="font-size:13px;font-weight:600">Community Blocklist (CAPI) <span style="font-size:10px;background:rgba(245,166,35,.15);color:var(--accent2);border:1px solid rgba(245,166,35,.3);padding:1px 6px;border-radius:4px;margin-left:4px">FREE TIER</span></div>
-          <div style="font-size:11px;color:var(--text3);margin-top:2px">IP addresses reported by the CrowdSec community worldwide via the Central API</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">IP addresses reported by the CrowdSec community worldwide via the Central API · <strong style="color:#e6edf3">$capi_dec</strong> active decisions</div>
         </div>
         <div style="text-align:right;font-family:var(--mono)">
-          <div style="font-size:15px;font-weight:700">@{[fmt_bytes(($metrics->{bytes}||0)*84)]}</div>
-          <div style="font-size:11px;color:var(--text3)">~98%</div>
+          <div style="font-size:15px;font-weight:700">$capi_bytes</div>
+          <div style="font-size:11px;color:var(--text3)">$capi_pct%</div>
         </div>
       </div>
       <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between">
         <div>
           <div style="font-size:13px;font-weight:600">CrowdSec Security Engine</div>
-          <div style="font-size:11px;color:var(--text3);margin-top:2px">Threats detected and blocked by your own Security Engines</div>
+          <div style="font-size:11px;color:var(--text3);margin-top:2px">Threats detected and blocked by your own Security Engines · <strong style="color:#e6edf3">$eng_dec</strong> active decisions</div>
         </div>
         <div style="text-align:right;font-family:var(--mono)">
-          <div style="font-size:15px;font-weight:700">@{[fmt_bytes(($metrics->{bytes}||0)*1)]}</div>
-          <div style="font-size:11px;color:var(--text3)">~2%</div>
+          <div style="font-size:15px;font-weight:700">$eng_bytes</div>
+          <div style="font-size:11px;color:var(--text3)">$eng_pct%</div>
         </div>
       </div>
     </div>
@@ -1008,150 +1096,30 @@ HTML
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB: BOUNCERS
+# TAB: SERVICES (merged with Bouncers)
 # ─────────────────────────────────────────────────────────────────────────────
-elsif ($tab eq 'bouncers') {
-    print <<HTML;
-HTML
-print render_topbar("🔥", "Bouncers", "", "bouncers");
-print <<HTML;
-<div class="content">
-HTML
-    # Service control cards
-    for my $svc (['crowdsec','⚙️ CrowdSec Engine','engine'],
-                 ['crowdsec-firewall-bouncer','🔥 Firewall Bouncer','bouncer']) {
-        my ($name, $label, $type) = @$svc;
-        my $st  = get_service_status($name);
-        my $err = get_service_errors($name);
-        my $cls = $st eq 'active' ? 'tag active' : 'tag inactive';
-        my $lbl = $st eq 'active' ? 'RUNNING' : ($st eq 'inactive' ? 'STOPPED' : 'UNKNOWN');
-        print <<HTML;
-  <div class="card" style="margin-bottom:16px">
-    <div class="card-header">
-      <div class="card-title">$label <span class="$cls">$lbl</span></div>
-      <div style="display:flex;gap:8px">
-        <form method="post" action="action.cgi"><input type="hidden" name="service" value="$name"><input type="hidden" name="action" value="start">
-          <button class="btn btn-success btn-sm">▶ Start</button></form>
-        <form method="post" action="action.cgi"><input type="hidden" name="service" value="$name"><input type="hidden" name="action" value="stop">
-          <button class="btn btn-danger btn-sm">■ Stop</button></form>
-        <form method="post" action="action.cgi"><input type="hidden" name="service" value="$name"><input type="hidden" name="action" value="restart">
-          <button class="btn btn-warn btn-sm">↺ Restart</button></form>
-      </div>
-    </div>
-HTML
-        if ($err) {
-            print <<HTML;
-    <div class="card-body">
-      <div class="err-label">⚠ Service Errors</div>
-      <div class="err-box">$err</div>
-    </div>
-HTML
-        }
-        print '</div>';
-    }
+elsif ($tab eq 'bouncers' || $tab eq 'services') {
+print render_topbar("🔧", "Services &amp; Bouncers", "", "bouncers");
+print '<div class="content">';
 
-    # Bouncers table
-    print <<HTML;
-  <div class="card">
-    <div class="card-header"><div class="card-title">Registered Bouncers</div></div>
-    <div class="card-body no-pad">
-HTML
-    if (@$bouncers) {
-        print '<table class="tbl"><thead><tr><th>Name</th><th>IP</th><th>Type</th><th>Version</th><th>Last Pull</th><th>Status</th></tr></thead><tbody>';
-        for my $b (@$bouncers) {
-            my $bname   = html_escape($b->{name}          // '-');
-            my $bip     = html_escape($b->{ip_address}    // $b->{ipAddress} // '-');
-            my $btype   = html_escape($b->{type}          // '-');
-            my $bver    = html_escape($b->{version}       // '-');
-            my $blp     = html_escape($b->{last_pull}     // $b->{lastPull} // '-');
-            my $bactive = $b->{isValid} // $b->{is_valid} // 1;
-            my $bst_cls = $bactive ? 'tag active' : 'tag inactive';
-            my $bst_lbl = $bactive ? 'OK' : 'REVOKED';
-            print "<tr><td class='mono'>$bname</td><td class='mono'>$bip</td>
-              <td>$btype</td><td class='mono'>$bver</td>
-              <td style='font-size:11px;color:var(--text3)'>$blp</td>
-              <td><span class='$bst_cls'>$bst_lbl</span></td></tr>";
-        }
-        print '</tbody></table>';
-    } else {
-        print '<div class="no-data">No bouncers registered</div>';
-    }
-    print '</div></div></div>'; # card + content
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB: HUB
-# ─────────────────────────────────────────────────────────────────────────────
-elsif ($tab eq 'hub') {
-    my $hub_json   = `cscli hub list -o json 2>/dev/null`;
-    my $hub_data   = load_json($hub_json) // {};
-    my $coll_json  = `cscli collections list -o json 2>/dev/null`;
-    my $coll_data  = load_json($coll_json) // [];
-    $coll_data = $coll_data->{collections} if ref $coll_data eq 'HASH';
-
-    print <<HTML;
-HTML
-print render_topbar("📦", "Hub", "", "hub");
-print <<HTML;
-<div class="content">
-  <div class="stat-grid">
-HTML
-    for my $section (['scenarios','🎯 Scenarios'],['parsers','🔍 Parsers'],
-                     ['collections','📦 Collections'],['postoverflows','📤 Post-overflows']) {
-        my ($key, $lbl) = @$section;
-        my $cnt = ref $hub_data->{$key} eq 'ARRAY' ? scalar @{$hub_data->{$key}} : 0;
-        print "<div class='stat-card'><div class='label'>$lbl</div><div class='value'>$cnt</div></div>";
-    }
-    print '</div>';
-
-    # Collections table
-    print <<HTML;
-  <div class="card">
-    <div class="card-header"><div class="card-title">📦 Installed Collections</div></div>
-    <div class="card-body no-pad">
-HTML
-    if (ref $coll_data eq 'ARRAY' && @$coll_data) {
-        print '<table class="tbl"><thead><tr><th>Name</th><th>Version</th><th>Status</th><th>Description</th></tr></thead><tbody>';
-        for my $c (@$coll_data) {
-            my $cname = html_escape($c->{name}        // '-');
-            my $cver  = html_escape($c->{version}     // '-');
-            my $cdesc = html_escape($c->{description} // '-');
-            my $cupd  = ($c->{local_version} // '') ne ($c->{version} // '') ? 'tag warn' : 'tag active';
-            my $clbl  = $c->{status} // 'enabled';
-            print "<tr><td class='mono'>$cname</td><td class='mono'>$cver</td>
-              <td><span class='$cupd'>$clbl</span></td>
-              <td style='font-size:11px;color:var(--text3)'>$cdesc</td></tr>";
-        }
-        print '</tbody></table>';
-    } else {
-        # Fallback: show raw hub counts
-        print '<div class="no-data" style="padding:20px">Run <code style="font-family:var(--mono)">cscli hub list</code> on the server to see installed items.</div>';
-    }
-    print '</div></div></div>'; # card + content
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB: SERVICES
-# ─────────────────────────────────────────────────────────────────────────────
-elsif ($tab eq 'services') {
-    print <<HTML;
-HTML
-print render_topbar("🔧", "Services", "", "services");
-print <<HTML;
-<div class="content">
-HTML
-    for my $svc (['crowdsec','⚙️','CrowdSec Engine','Main detection engine'],
-                 ['crowdsec-firewall-bouncer','🔥','Firewall Bouncer','Applies bans to the firewall']) {
+    # ── Service control cards ────────────────────────────────────────────────
+    print '<div class="section-title" style="margin-bottom:14px">⚙️ Service Control</div>';
+    for my $svc (
+        ['crowdsec',                  '⚙️', 'CrowdSec Engine',    'Main detection engine — reads logs and triggers alerts'],
+        ['crowdsec-firewall-bouncer', '🔥', 'Firewall Bouncer',   'Applies bans to the firewall — enforces decisions'],
+    ) {
         my ($name, $ico, $label, $desc) = @$svc;
         my $st  = get_service_status($name);
         my $err = get_service_errors($name);
-        my $scls= $st eq 'active' ? 'tag active' : ($st eq 'inactive' ? 'tag inactive' : 'tag');
-        my $slbl= $st eq 'active' ? '● RUNNING'  : ($st eq 'inactive' ? '● STOPPED'   : '? UNKNOWN');
+        my $cls = $st eq 'active'   ? 'tag active'   :
+                  $st eq 'inactive' ? 'tag inactive'  : 'tag';
+        my $lbl = $st eq 'active'   ? '● RUNNING'    :
+                  $st eq 'inactive' ? '● STOPPED'     : '? UNKNOWN';
         print <<HTML;
-  <div class="card" style="margin-bottom:16px">
+  <div class="card" style="margin-bottom:14px">
     <div class="card-header">
       <div class="card-title">$ico $label
-        <span class="$scls" style="margin-left:8px">$slbl</span>
+        <span class="$cls" style="margin-left:8px">$lbl</span>
       </div>
       <div style="display:flex;gap:8px">
         <form method="post" action="action.cgi"><input type="hidden" name="service" value="$name"><input type="hidden" name="action" value="start">
@@ -1163,7 +1131,7 @@ HTML
       </div>
     </div>
     <div class="card-body">
-      <p style="font-size:12px;color:var(--text3);margin-bottom:12px">$desc &nbsp;·&nbsp; <code style="font-family:var(--mono);font-size:11px">$name.service</code></p>
+      <p style="font-size:12px;color:#8b949e;margin-bottom:10px">$desc &nbsp;·&nbsp; <code style="font-family:var(--mono);font-size:11px;color:#e6edf3!important;background:rgba(255,255,255,.07);padding:2px 6px;border-radius:4px">$name.service</code></p>
 HTML
         if ($err) {
             print qq(<div class="err-label">⚠ Recent Errors</div><div class="err-box">$err</div>);
@@ -1172,6 +1140,167 @@ HTML
         }
         print '</div></div>';
     }
+
+    # ── Registered bouncers table ────────────────────────────────────────────
+    my $b_cnt = scalar @$bouncers;
+    print <<HTML;
+  <div class="section-title" style="margin-top:8px;margin-bottom:14px">🔗 Registered Bouncers
+    <span style="font-size:13px;font-weight:400;color:#6e7681">$b_cnt connected</span>
+  </div>
+  <div class="card">
+    <div class="card-body no-pad">
+HTML
+    if (@$bouncers) {
+        print '<table class="tbl"><thead><tr>
+          <th>Name</th><th>Type</th><th>Version</th><th>IP</th><th>Last Pull</th><th>Status</th>
+        </tr></thead><tbody>';
+        for my $b (@$bouncers) {
+            my $bname = html_escape($b->{name}       // '-');
+            my $btype = html_escape($b->{type}       // '-');
+            my $bver  = html_escape($b->{version}    // '-');
+            my $bip   = html_escape($b->{ip_address} // $b->{ipAddress} // '-');
+            my $blp   = html_escape($b->{last_pull}  // $b->{lastPull}  // '-');
+            my $ok    = $b->{isValid} // $b->{is_valid} // 1;
+            my $bstag = $ok ? 'tag active' : 'tag';
+            my $bslbl = $ok ? 'OK' : 'REVOKED';
+            print "<tr>
+              <td class='mono' style='font-size:12px'>$bname</td>
+              <td style='font-size:12px'>$btype</td>
+              <td class='mono' style='font-size:11px'>$bver</td>
+              <td class='mono' style='font-size:11px'>$bip</td>
+              <td style='font-size:11px;color:#6e7681'>$blp</td>
+              <td><span class='$bstag'>$bslbl</span></td>
+            </tr>";
+        }
+        print '</tbody></table>';
+    } else {
+        print '<div class="no-data">No bouncers registered</div>';
+    }
+    print '</div></div>';
+    print '</div>'; # content
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB: HUB
+# ─────────────────────────────────────────────────────────────────────────────
+elsif ($tab eq 'hub') {
+    my $hub_json = `cscli hub list -o json 2>/dev/null`;
+    my $hub_data = load_json($hub_json) // {};
+
+    my %hub_items;
+    for my $key (qw(scenarios parsers collections postoverflows)) {
+        $hub_items{$key} = ref $hub_data->{$key} eq 'ARRAY' ? $hub_data->{$key} : [];
+    }
+
+    my @sections = (
+        ['scenarios',     '🎯', 'Scenarios',     '#6c63ff'],
+        ['parsers',       '🔍', 'Parsers',        '#f5a623'],
+        ['collections',   '📦', 'Collections',    '#3dd68c'],
+        ['postoverflows', '📤', 'Post-overflows', '#58a6ff'],
+    );
+
+    print render_topbar("📦", "Hub", "", "hub");
+    print '<div class="content">';
+
+    # Tab buttons
+    print '<div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">';
+    my $first = 1;
+    for my $s (@sections) {
+        my ($key, $ico, $lbl, $col) = @$s;
+        my $cnt  = scalar @{$hub_items{$key}};
+        my $bg   = $first ? "background:rgba(108,99,255,0.15);border-color:rgba(108,99,255,0.5)"
+                          : "background:var(--surface2);border-color:var(--border)";
+        print <<HTML;
+<button onclick="showHub('$key', this)"
+  style="display:flex;flex-direction:column;align-items:flex-start;gap:4px;
+    padding:14px 20px;border-radius:10px;border:1px solid;cursor:pointer;
+    font-family:var(--sans);transition:all .15s;min-width:130px;$bg"
+  class="hub-btn @{[$first ? 'hub-active' : '']}">
+  <span style="font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.06em">$ico $lbl</span>
+  <span style="font-size:28px;font-weight:700;font-family:var(--mono);color:$col">$cnt</span>
+</button>
+HTML
+        $first = 0;
+    }
+    print '</div>';
+
+    # Content panels
+    for my $s (@sections) {
+        my ($key, $ico, $lbl, $col) = @$s;
+        my $items   = $hub_items{$key};
+        my $display = ($key eq 'scenarios') ? 'block' : 'none';
+        my $cnt     = scalar @$items;
+        print <<HTML;
+<div id="hub-panel-$key" style="display:$display">
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">$ico $lbl
+        <span style="font-size:13px;font-weight:400;color:#6e7681;margin-left:8px">$cnt installed</span>
+      </div>
+    </div>
+    <div class="card-body no-pad">
+HTML
+        if (@$items) {
+            print '<table class="tbl"><thead><tr>
+              <th>Name</th><th>Version</th><th>Status</th><th>Description</th>
+            </tr></thead><tbody>';
+            for my $item (@$items) {
+                my $name   = html_escape($item->{name}        // '-');
+                my $ver    = html_escape($item->{version}     // $item->{local_version} // '');
+                my $desc   = html_escape($item->{description} // '');
+                my $status = $item->{status} // 'enabled';
+                my $lv     = $item->{local_version} // '';
+                my $upd    = ($lv && $ver && $lv ne $ver);
+                my @statuses   = split /,/, $status;
+                my $is_enabled = grep { /^enabled$/i } @statuses;
+                my $is_local   = grep { /^local$/i   } @statuses;
+                my $badge_html;
+                if ($upd) {
+                    $badge_html = "<span class='tag warn'>update available</span>";
+                } else {
+                    $badge_html  = $is_enabled ? "<span class='tag active'>enabled</span> " : '';
+                    $badge_html .= $is_local   ? "<span style='display:inline-flex;align-items:center;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:600;background:rgba(88,166,255,0.12);color:#58a6ff;border:1px solid rgba(88,166,255,0.25)'>local</span>" : '';
+                    $badge_html ||= "<span class='tag'>$status</span>";
+                }
+                my $ver_display = $ver || ($is_local ? '<span style="color:#6e7681">local</span>' : '-');
+                print "<tr>
+                  <td class='mono' style='font-size:12px'>$name</td>
+                  <td class='mono' style='font-size:11px'>$ver_display</td>
+                  <td style='white-space:nowrap'>$badge_html</td>
+                  <td style='font-size:11px;color:#8b949e'>$desc</td>
+                </tr>";
+            }
+            print '</tbody></table>';
+        } else {
+            print "<div class='no-data'>No $lbl installed</div>";
+        }
+        print '</div></div></div>';
+    }
+
+    print <<'HTML';
+<style>
+.hub-btn { color: inherit; }
+.hub-btn:hover { border-color: rgba(108,99,255,0.4) !important; background: rgba(108,99,255,0.08) !important; }
+.hub-btn.hub-active { background: rgba(108,99,255,0.15) !important; border-color: rgba(108,99,255,0.5) !important; }
+</style>
+<script>
+function showHub(key, btn) {
+  ['scenarios','parsers','collections','postoverflows'].forEach(function(k) {
+    var p = document.getElementById('hub-panel-' + k);
+    if (p) p.style.display = (k === key) ? 'block' : 'none';
+  });
+  document.querySelectorAll('.hub-btn').forEach(function(b) {
+    b.classList.remove('hub-active');
+    b.style.background = 'var(--surface2)';
+    b.style.borderColor = 'var(--border)';
+  });
+  btn.classList.add('hub-active');
+  btn.style.background = 'rgba(108,99,255,0.15)';
+  btn.style.borderColor = 'rgba(108,99,255,0.5)';
+}
+</script>
+HTML
     print '</div>'; # content
 }
 
@@ -1204,6 +1333,13 @@ function setViz(mode, btn) {
   btn.classList.add('active');
   var body = document.getElementById('viz-body');
   if (body) body.style.display = mode === 'none' ? 'none' : '';
+  // Show summary or expanded lists
+  document.querySelectorAll('.viz-summary').forEach(function(el) {
+    el.style.display = (mode === 'expanded') ? 'none' : '';
+  });
+  document.querySelectorAll('.viz-expanded').forEach(function(el) {
+    el.style.display = (mode === 'expanded') ? '' : 'none';
+  });
 }
 
 // ── Source ASs card tooltip (engine ID on hover) ──────────────────────────────

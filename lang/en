@@ -8,3 +8,7 @@ status_stopped=Stopped
 status_unknown=Unknown
 err_service=Unknown service
 err_action=Unknown action
+
+# Config page field labels
+config_test_ip_ranges=Test IP ranges (one CIDR per line, e.g. 1.2.3.0/24)
+config_exclude_by_default=Exclude test IPs by default on every page load?

@@ -1,0 +1,2 @@
+test_ip_ranges=Test IP ranges (one CIDR per line),9,60,10
+exclude_by_default=Exclude test IPs by default on every page load?,1,1-Yes,0-No
