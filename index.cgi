@@ -5,88 +5,20 @@ require './crowdsec-lib.pl';
 
 &ReadParse();
 
-my $tab = $in{'tab'} || 'engines';
+my $tab          = $in{'tab'}          || 'engines';
+my $exclude_test = $in{'exclude_test'} ? 1 : 0;
+my $qs_filter    = $exclude_test ? '&exclude_test=1' : '';  # append to all tab links
 
 &ui_print_header(undef, "CrowdSec Security Engine", "", undef, 1, 1);
 
-# ── Filter state (drives the click-and-dive drilldowns) ───────────────────────
-# Any of these can arrive as a query param, either typed into the filter bar
-# or clicked through from a ranked-list item / table cell elsewhere in the UI.
-# 'engine' and 'as' aren't real cscli filter flags, so they're applied as a
-# post-filter on the already-fetched alert list below.
-my @FILTER_KEYS = qw(ip range scope scenario type origin since until engine as);
-my %filter;
-for my $k (@FILTER_KEYS) {
-    $filter{$k} = $in{$k} if defined $in{$k} && $in{$k} ne '';
-}
-my $since = $filter{since} || '24h';
-my $has_filter = grep { $_ ne 'since' } keys %filter;
-
-# Human labels for chips
-my %FILTER_LABEL = (
-    ip => 'IP', range => 'Range', scope => 'Scope', scenario => 'Scenario',
-    type => 'Type', origin => 'Origin', since => 'Since', until => 'Until',
-    engine => 'Engine', as => 'AS',
-);
-
-# Renders the active-filter chip bar for the current tab. Each chip has an
-# "x" that removes just that filter; "Clear all" resets to the tab default.
-sub filter_bar_html {
-    return '' unless $has_filter;
-    my $html = '<div class="filter-bar"><span class="fb-label">Filtered by:</span>';
-    for my $k (@FILTER_KEYS) {
-        next unless defined $filter{$k} && $filter{$k} ne '';
-        my $lbl = $FILTER_LABEL{$k} || $k;
-        my $val = html_escape($filter{$k});
-        my $rm_qs = filter_qs(skip => $k);
-        $html .= qq(<span class="chip">$lbl: $val <a href="index.cgi?tab=$tab@{[$rm_qs ? qq(&$rm_qs) : '']}" title="Remove filter">✕</a></span>);
-    }
-    $html .= qq(<a class="fb-clear" href="index.cgi?tab=$tab">Clear all ✕</a></div>);
-    return $html;
-}
-
-# Builds a "dive in" link that reloads the current tab (or a different one,
-# via $opts{tab}) with one extra filter applied on top of whatever's active.
-sub dive_link {
-    my ($label, %opts) = @_;
-    my $target_tab = delete $opts{tab} || $tab;
-    my $qs = filter_qs(add => \%opts);
-    return qq(<a class="dive" href="index.cgi?tab=$target_tab@{[$qs ? qq(&$qs) : '']}">) . html_escape($label) . '</a>';
-}
-
-# Shows the raw `cscli <type> list -o json` output (truncated) when parsing
-# comes back empty, so an unexpected field/wrapper shape on this cscli
-# version is visible instead of a silent dead end.
-sub debug_raw_snippet {
-    my ($type) = @_;
-    my $raw = get_hub_list_raw($type);
-    return '' unless defined $raw && $raw ne '';
-    my $snippet = length($raw) > 2000 ? substr($raw, 0, 2000) . "\n... (truncated)" : $raw;
-    return qq(<details style="margin-top:10px;font-size:11px;color:var(--text3)">
-      <summary style="cursor:pointer">Show raw <code>cscli $type list -o json</code> output (debug)</summary>
-      <pre style="white-space:pre-wrap;word-break:break-all;margin-top:8px">@{[html_escape($snippet)]}</pre>
-    </details>);
-}
-
-sub filter_qs {
-    # Re-serialise the current filter set (optionally minus $skip) as a
-    # query string, for building drill-down / clear links.
-    my (%opts) = @_;
-    my %f = %filter;
-    delete $f{$opts{skip}} if $opts{skip};
-    $f{$_} = $opts{add}{$_} for keys %{$opts{add} || {}};
-    return join('&', map { "$_=" . &urlize($f{$_}) } grep { defined $f{$_} && $f{$_} ne '' } sort keys %f);
-}
-
 # ── Gather data up-front ──────────────────────────────────────────────────────
-my $alerts    = get_alerts_detail($since, \%filter);
-if ($filter{engine}) {
-    $alerts = [ grep { (($_->{machine_id} // $_->{machineId} // '') eq $filter{engine}) } @$alerts ];
-}
-if ($filter{as}) {
-    $alerts = [ grep { (($_->{source}{as_name} // $_->{source}{as_number} // '') eq $filter{as}) } @$alerts ];
-}
-my $decisions = get_decisions(\%filter);
+my $alerts_raw = get_alerts_detail('24h');
+# Apply test-IP filter if checkbox is on
+my $alerts = $exclude_test
+    ? filter_alerts($alerts_raw, @TEST_IP_RANGES)
+    : $alerts_raw;
+my $filtered_count = scalar(@$alerts_raw) - scalar(@$alerts);
+my $decisions = get_decisions();
 my $engines   = get_engine_info();
 my $bouncers  = get_bouncers();
 my $hub       = get_hub_counts();
@@ -99,15 +31,6 @@ my $alert_cnt = scalar @$alerts;
 my %_uniq_ips; $_uniq_ips{$_->{source}{ip}}++ for grep { $_->{source}{ip} } @$alerts;
 my $uniq_ip_cnt = scalar keys %_uniq_ips;
 my $dec_cnt   = scalar @$decisions;
-
-# Sidebar badges should reflect true totals, not whatever filter happens to
-# be active on the current tab - fetch unfiltered counts separately when a
-# filter is in play.
-my ($badge_alert_cnt, $badge_dec_cnt) = ($alert_cnt, $dec_cnt);
-if ($has_filter) {
-    $badge_alert_cnt = scalar @{ get_alerts_detail($since) };
-    $badge_dec_cnt   = scalar @{ get_decisions() };
-}
 
 # Scenario breakdown
 my $sc_counts = get_scenario_counts($alerts);
@@ -219,6 +142,19 @@ body::before{content:'';position:fixed;inset:0;
   padding:16px 28px;border-bottom:1px solid var(--border);background:var(--surface)}
 .page-title .ico{font-size:22px}
 .topbar-right{display:flex;align-items:center;gap:10px}
+/* Exclude test IPs toggle */
+.test-filter{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;
+  padding:5px 12px;border-radius:7px;border:1px solid var(--border);
+  background:var(--surface2);cursor:pointer;user-select:none;transition:all .15s;
+  color:#8b949e;text-decoration:none}
+.test-filter:hover{border-color:rgba(108,99,255,0.4);color:#e6edf3}
+.test-filter.active{background:rgba(108,99,255,0.12);border-color:rgba(108,99,255,0.4);color:var(--accent)}
+.test-filter .tf-dot{width:8px;height:8px;border-radius:50%;background:#3c4454;
+  transition:background .15s;flex-shrink:0}
+.test-filter.active .tf-dot{background:var(--accent);box-shadow:0 0 6px var(--accent)}
+.filter-badge{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);
+  font-size:10px;background:rgba(240,180,41,0.12);color:var(--warning);
+  border:1px solid rgba(240,180,41,0.25);padding:2px 8px;border-radius:12px}
 .btn{font-family:var(--sans);font-size:12px;font-weight:600;padding:7px 14px;
   border-radius:7px;border:none;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
 .btn-primary{background:var(--accent);color:#fff}
@@ -377,49 +313,10 @@ body::before{content:'';position:fixed;inset:0;
 .bl-card-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--text3);font-family:var(--mono)}
 
 /* ── Responsive ── */
-@media(max-width:900px){
-  .sidebar{position:fixed;left:0;top:0;height:100vh;z-index:210;
-    transform:translateX(-104%);transition:transform .22s ease;box-shadow:0 0 40px rgba(0,0,0,.6)}
-  .sidebar.open{transform:translateX(0)}
-  .mobile-nav-toggle{display:inline-flex!important}
-  .sidebar-overlay.open{display:block}
-}
-.mobile-nav-toggle{display:none;position:fixed;top:14px;left:14px;z-index:220;
-  background:var(--surface2);border:1px solid var(--border2);color:var(--text);
-  border-radius:8px;width:38px;height:38px;align-items:center;justify-content:center;
-  font-size:17px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.4)}
-.sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:200}
+@media(max-width:900px){.sidebar{display:none}}
 
 form{display:inline}
 .no-data{text-align:center;padding:40px;color:var(--text3);font-family:var(--mono);font-size:12px}
-
-a.stat-card{display:block;text-decoration:none;color:inherit;cursor:pointer;transition:border-color .15s}
-a.stat-card:hover{border-color:var(--accent2)}
-
-/* ── Filter bar / chips (click-and-dive) ── */
-.filter-bar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;
-  background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);
-  padding:10px 14px;margin-bottom:16px}
-.filter-bar .fb-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-right:2px}
-.chip{display:inline-flex;align-items:center;gap:6px;background:rgba(108,99,255,.12);
-  color:#a99cff;border:1px solid rgba(108,99,255,.3);border-radius:20px;
-  padding:3px 6px 3px 10px;font-size:11px;font-family:var(--mono)}
-.chip a{color:#a99cff;text-decoration:none;background:rgba(255,255,255,.08);
-  border-radius:50%;width:15px;height:15px;display:inline-flex;align-items:center;justify-content:center;font-size:10px}
-.chip a:hover{background:rgba(255,92,92,.3);color:#fff}
-.filter-bar .fb-clear{margin-left:auto;font-size:11px;color:var(--text3);text-decoration:none}
-.filter-bar .fb-clear:hover{color:var(--danger)}
-.filter-form{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:16px}
-.filter-form input[type=text]{background:var(--bg);border:1px solid var(--border);color:var(--text);
-  border-radius:6px;padding:6px 10px;font-size:12px;font-family:var(--mono);width:120px}
-.filter-form input[type=text]::placeholder{color:var(--text3)}
-
-/* ── Clickable dive links inside tables/ranked lists ── */
-a.dive{color:inherit;text-decoration:none;border-bottom:1px dashed rgba(255,255,255,.25)}
-a.dive:hover{color:var(--accent);border-bottom-color:var(--accent)}
-.ranked-label a.dive{color:var(--text)}
-a.row-view{color:var(--text3);text-decoration:none;font-size:14px}
-a.row-view:hover{color:var(--accent)}
 /* CAPI connectivity dot */
 .capi-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:8px;vertical-align:middle;cursor:help}
 .capi-dot.on {background:var(--success);box-shadow:0 0 5px var(--success)}
@@ -442,34 +339,35 @@ print <<HTML;
     <div class="logo">🛡️</div>
     <div><h2>CrowdSec</h2><p>SECURITY ENGINE</p></div>
   </div>
+  @{[$exclude_test ? '<div style="margin:8px 12px 4px;background:rgba(108,99,255,0.12);border:1px solid rgba(108,99,255,0.3);border-radius:7px;padding:5px 10px;font-size:11px;color:#a99cff">&#x25CF; Test IPs filtered</div>' : '']}
   <div class="sb-section">
     <div class="sb-label">Monitor</div>
-    <a class="sb-item @{[$tab eq 'engines'   ? 'active' : '']}" href="index.cgi?tab=engines">
+    <a class="sb-item @{[$tab eq 'engines'   ? 'active' : '']}" href="index.cgi?tab=engines$qs_filter">
       <span class="ico">⚙️</span> Engines
       <span class="badge">@{[scalar @$engines]}</span>
     </a>
-    <a class="sb-item @{[$tab eq 'alerts'    ? 'active' : '']}" href="index.cgi?tab=alerts">
+    <a class="sb-item @{[$tab eq 'alerts'    ? 'active' : '']}" href="index.cgi?tab=alerts$qs_filter">
       <span class="ico">🔔</span> Alerts
-      <span class="badge">$badge_alert_cnt</span>
+      <span class="badge">$alert_cnt</span>
     </a>
-    <a class="sb-item @{[$tab eq 'decisions' ? 'active' : '']}" href="index.cgi?tab=decisions">
+    <a class="sb-item @{[$tab eq 'decisions' ? 'active' : '']}" href="index.cgi?tab=decisions$qs_filter">
       <span class="ico">🚫</span> Decisions
-      <span class="badge">$badge_dec_cnt</span>
+      <span class="badge">$dec_cnt</span>
     </a>
-    <a class="sb-item @{[$tab eq 'metrics'   ? 'active' : '']}" href="index.cgi?tab=metrics">
+    <a class="sb-item @{[$tab eq 'metrics'   ? 'active' : '']}" href="index.cgi?tab=metrics$qs_filter">
       <span class="ico">📊</span> Remediation Metrics
     </a>
   </div>
   <div class="sb-section">
     <div class="sb-label">Manage</div>
-    <a class="sb-item @{[$tab eq 'bouncers'  ? 'active' : '']}" href="index.cgi?tab=bouncers">
+    <a class="sb-item @{[$tab eq 'bouncers'  ? 'active' : '']}" href="index.cgi?tab=bouncers$qs_filter">
       <span class="ico">🔥</span> Bouncers
       <span class="badge">@{[scalar @$bouncers]}</span>
     </a>
-    <a class="sb-item @{[$tab eq 'hub'       ? 'active' : '']}" href="index.cgi?tab=hub">
+    <a class="sb-item @{[$tab eq 'hub'       ? 'active' : '']}" href="index.cgi?tab=hub$qs_filter">
       <span class="ico">📦</span> Hub
     </a>
-    <a class="sb-item @{[$tab eq 'services'  ? 'active' : '']}" href="index.cgi?tab=services">
+    <a class="sb-item @{[$tab eq 'services'  ? 'active' : '']}" href="index.cgi?tab=services$qs_filter">
       <span class="ico">🔧</span> Services
     </a>
   </div>
@@ -488,23 +386,41 @@ HTML
 
 
 # ── Main content area ─────────────────────────────────────────────────────────
-print '<button class="mobile-nav-toggle" onclick="toggleSidebar()" aria-label="Open menu">☰</button>';
-print '<div class="sidebar-overlay" id="sidebar-overlay" onclick="toggleSidebar()"></div>';
 print '<div class="main">';
+
+# ── Helper: consistent topbar with filter toggle ──────────────────────────────
+sub render_topbar {
+    my ($icon, $title, $subtitle, $refresh_tab) = @_;
+    my $toggle_url  = "index.cgi?tab=$refresh_tab&exclude_test=" . ($exclude_test ? 0 : 1);
+    my $refresh_url = "index.cgi?tab=$refresh_tab" . ($exclude_test ? '&exclude_test=1' : '');
+    my $active_cls  = $exclude_test ? 'active' : '';
+    my $sub_html    = $subtitle ? qq( <span style="font-size:13px;font-weight:400;color:#6e7681">· $subtitle</span>) : '';
+    my $badge_html  = '';
+    if ($exclude_test && $filtered_count > 0) {
+        $badge_html = qq( <span class="filter-badge">⚠ $filtered_count test alerts excluded</span>);
+    }
+    return <<HTML;
+<div class="topbar">
+  <div class="page-title"><span class="ico">$icon</span> $title$sub_html$badge_html</div>
+  <div class="topbar-right">
+    <a href="$toggle_url" class="test-filter $active_cls" title="Exclude 1.2.3.0/24 and 192.0.2.0/24 test ranges">
+      <span class="tf-dot"></span>Exclude test IPs
+    </a>
+    <a href="$refresh_url" class="btn btn-ghost btn-sm">↺ Refresh</a>
+  </div>
+</div>
+HTML
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB: ENGINES
 # ─────────────────────────────────────────────────────────────────────────────
 if ($tab eq 'engines') {
     print <<HTML;
-<div class="topbar">
-  <div class="page-title"><span class="ico">⚙️</span> Engines</div>
-  <div class="topbar-right">
-    <a href="index.cgi?tab=engines" class="btn btn-ghost btn-sm">↺ Refresh</a>
-  </div>
-</div>
 <div class="content">
 HTML
+
+    print render_topbar("⚙️", "Engines", "", "engines");
 
     # Stat row — use local service status for "active" count, not CAPI isOnline
     my $online  = ($cs_status eq 'active') ? scalar(@$engines) : 0;
@@ -514,17 +430,17 @@ HTML
 
     print <<HTML;
   <div class="stat-grid">
-    <a class="stat-card accent" href="index.cgi?tab=alerts" title="Local engine detections — higher than app.crowdsec.net which only shows CAPI-reported alerts (after noise cancelling &amp; quota)">
+    <div class="stat-card accent" title="Local engine detections — higher than app.crowdsec.net which only shows CAPI-reported alerts (after noise cancelling &amp; quota)">
       <div class="label">Alerts · 24h <span style="font-size:9px;opacity:.6">LOCAL</span></div>
-      <div class="value">$alert_cnt</div><div class="sub">All local detections</div></a>
-    <a class="stat-card" href="index.cgi?tab=engines"><div class="label">Engines</div>
-      <div class="value">@{[scalar @$engines]}</div><div class="sub">$online active</div></a>
-    <a class="stat-card" href="index.cgi?tab=decisions"><div class="label">Decisions</div>
-      <div class="value">$dec_cnt</div><div class="sub">Active bans</div></a>
-    <a class="stat-card" href="index.cgi?tab=hub&view=scenarios"><div class="label">Scenarios</div>
-      <div class="value">$sc_cnt</div><div class="sub">Installed</div></a>
-    <a class="stat-card" href="index.cgi?tab=bouncers"><div class="label">Bouncers</div>
-      <div class="value">@{[scalar @$bouncers]}</div><div class="sub">Remediation</div></a>
+      <div class="value">$alert_cnt</div><div class="sub">All local detections</div></div>
+    <div class="stat-card"><div class="label">Engines</div>
+      <div class="value">@{[scalar @$engines]}</div><div class="sub">$online active</div></div>
+    <div class="stat-card"><div class="label">Decisions</div>
+      <div class="value">$dec_cnt</div><div class="sub">Active bans</div></div>
+    <div class="stat-card"><div class="label">Scenarios</div>
+      <div class="value">$sc_cnt</div><div class="sub">Installed</div></div>
+    <div class="stat-card"><div class="label">Bouncers</div>
+      <div class="value">@{[scalar @$bouncers]}</div><div class="sub">Remediation</div></div>
   </div>
 HTML
 
@@ -555,17 +471,15 @@ HTML
             my $lu_raw = $eng->{last_update} || '';
             my $lu_display;
             if ($lu_raw =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/) {
-                # Parse timestamp and compute age. Using the already-captured
-                # components with Time::Local avoids re-parsing a
-                # reconstructed timestamp string with Time::Piece::strptime,
-                # which broke (and warned) whenever $lu_raw's suffix didn't
-                # exactly match the assumed .ffffffZ / Z shape.
+                # Parse timestamp and compute age
+                eval { require POSIX; };
                 my ($yr,$mo,$dy,$hr,$mn,$sc) = ($1,$2,$3,$4,$5,$6);
+                # Build epoch via string (avoids timezone issues — treat as UTC)
                 my $ts_epoch = eval {
-                    require Time::Local;
-                    Time::Local::timegm($sc, $mn, $hr, $dy, $mo - 1, $yr);
+                    require Time::Piece;
+                    Time::Piece->strptime($lu_raw =~ s/\.\d+Z?$//r . 'Z', '%Y-%m-%dT%H:%M:%SZ')->epoch;
                 };
-                if (defined $ts_epoch) {
+                if ($ts_epoch) {
                     my $age = time() - $ts_epoch;
                     if    ($age < 60)        { $lu_display = 'just now'; }
                     elsif ($age < 3600)      { $lu_display = int($age/60)   . ' min ago'; }
@@ -636,23 +550,18 @@ HTML
 # ─────────────────────────────────────────────────────────────────────────────
 elsif ($tab eq 'alerts') {
 
-    # Build ranked list HTML helper. $filter_key says which filter clicking
-    # an item should apply (ip/as/engine/scenario) - the click-and-dive entry
-    # point for the visualizer cards.
+    # Build ranked list HTML helper
     sub ranked_html {
-        my ($items, $filter_key) = @_;
+        my ($items) = @_;
         my $html = '<ul class="ranked-list">';
         my $r = 1;
         for my $it (@$items) {
             next unless defined $it->{label} && $it->{label} ne '';
             my $cls = "r$r";
             my $lbl = html_escape($it->{label});
-            my $label_html = $filter_key
-                ? dive_link($it->{label}, $filter_key => $it->{label})
-                : $lbl;
             $html .= qq(<li class="ranked-item">
               <span class="rank-badge $cls">$r</span>
-              <span class="ranked-label" title="$lbl">$label_html</span>
+              <span class="ranked-label" title="$lbl">$lbl</span>
               <span class="ranked-count">x $it->{count}</span>
             </li>);
             last if $r++ >= 3;
@@ -661,34 +570,17 @@ elsif ($tab eq 'alerts') {
         return $html;
     }
 
-    my $ip_list  = ranked_html($top_ips,  'ip');
-    my $as_list  = ranked_html($top_as,   'as');
-    my $eng_list = ranked_html($top_eng,  'engine');
-    my $sc_list  = ranked_html($top_sc,   'scenario');
+    my $ip_list  = ranked_html($top_ips);
+    my $as_list  = ranked_html($top_as);
+    my $eng_list = ranked_html($top_eng);
+    my $sc_list  = ranked_html($top_sc);
 
-    my $since_lbl = html_escape($since);
     print <<HTML;
-<div class="topbar">
-  <div class="page-title"><span class="ico">🔔</span> Alerts
-    <span style="font-size:13px;font-weight:400;color:var(--text3)">· Last $since_lbl</span>
-  </div>
-  <div class="topbar-right">
-    <a href="index.cgi?tab=alerts" class="btn btn-ghost btn-sm">↺ Refresh</a>
-  </div>
-</div>
+HTML
+print render_topbar("🔔", "Alerts", "Last 24h", "alerts");
+print <<HTML;
 <div class="content">
 HTML
-    print filter_bar_html();
-    print qq(<form class="filter-form" method="get" action="index.cgi">
-      <input type="hidden" name="tab" value="alerts">
-      <input type="text" name="ip" placeholder="IP" value="@{[html_escape($filter{ip}//'')]}">
-      <input type="text" name="range" placeholder="Range (CIDR)" value="@{[html_escape($filter{range}//'')]}">
-      <input type="text" name="scenario" placeholder="Scenario" value="@{[html_escape($filter{scenario}//'')]}">
-      <input type="text" name="type" placeholder="Type" value="@{[html_escape($filter{type}//'')]}">
-      <input type="text" name="origin" placeholder="Origin" value="@{[html_escape($filter{origin}//'')]}">
-      <input type="text" name="since" placeholder="Since (24h, 7d...)" value="@{[html_escape($since)]}">
-      <button class="btn btn-primary btn-sm" type="submit">Apply</button>
-    </form>);
 
     # Quota-style banner
     print <<HTML;
@@ -756,39 +648,33 @@ HTML
 HTML
     if (@$alerts) {
         print '<table class="tbl"><thead><tr>
-          <th>When</th><th>Scenario</th><th>Source</th><th>Target</th><th>Decisions</th><th></th></tr></thead><tbody>';
+          <th>When</th><th>Scenario</th><th>Source</th><th>Target</th><th>Decisions</th></tr></thead><tbody>';
         my $shown = 0;
         for my $a (@$alerts) {
             last if $shown++ >= 100;
-            my $id      = $a->{id} // '';
             my $when    = html_escape($a->{start_at} // '-');
-            my $sc_raw  = $a->{scenario} // '-';
-            my $sc      = $sc_raw eq '-' ? '-' : dive_link($sc_raw, scenario => $sc_raw);
-            my $ip_raw  = $a->{source}{ip} // '';
-            my $src_ip  = $ip_raw ne '' ? dive_link($ip_raw, ip => $ip_raw) : 'Scope: range';
+            my $sc      = html_escape($a->{scenario}  // '-');
+            my $src_ip  = html_escape($a->{source}{ip} // 'Scope: range');
             my $src_as  = html_escape($a->{source}{as_name} // $a->{source}{as_number} // '');
             my $src_cn  = html_escape($a->{source}{cn} // '');
             my $src_sub = join(' ', grep {$_} ($src_as, $src_cn));
-            my $target_raw = $a->{machine_id} // $a->{machineId} // '';
-            # Truncate long machine IDs for display, keep full value for the link
-            my $target_disp = length($target_raw) > 20 ? '...'.substr($target_raw,-4) : $target_raw;
-            my $target = $target_raw ne '' ? dive_link($target_disp, engine => $target_raw) : '-';
+            my $target  = html_escape($a->{machine_id} // $a->{machineId} // '-');
+            # Truncate long machine IDs
+            my $target_short = length($target) > 20 ? '...'.substr($target,-4) : $target;
             my $ndec    = scalar @{$a->{decisions} // []};
-            my $view    = $id ne '' ? qq(<a class="row-view" href="index.cgi?tab=alert_detail&id=$id" title="View full alert">🔍</a>) : '';
             print <<HTML;
 <tr>
   <td class="mono" style="white-space:nowrap;font-size:11px">$when</td>
   <td><span class="tag scenario">$sc</span></td>
   <td class="mono"><span style="font-weight:600">$src_ip</span><br><span style="color:var(--text3);font-size:10px">$src_sub</span></td>
-  <td class="mono" style="font-size:11px">$target</td>
+  <td class="mono" style="font-size:11px">$target_short</td>
   <td><span class="tag ban">$ndec ban</span></td>
-  <td>$view</td>
 </tr>
 HTML
         }
         print '</tbody></table>';
     } else {
-        print '<div class="no-data">✓ No alerts match the current filter</div>';
+        print '<div class="no-data">✓ No alerts in the last 24 hours</div>';
     }
     print '</div></div>'; # card
     print '</div>'; # content
@@ -800,37 +686,17 @@ HTML
 # ─────────────────────────────────────────────────────────────────────────────
 elsif ($tab eq 'decisions') {
     print <<HTML;
-<div class="topbar">
-  <div class="page-title"><span class="ico">🚫</span> Decisions</div>
-  <div class="topbar-right">
-    <a href="index.cgi?tab=decisions" class="btn btn-ghost btn-sm">↺ Refresh</a>
-  </div>
-</div>
-<div class="content">
 HTML
-    print filter_bar_html();
-    print qq(<form class="filter-form" method="get" action="index.cgi">
-      <input type="hidden" name="tab" value="decisions">
-      <input type="text" name="ip" placeholder="IP" value="@{[html_escape($filter{ip}//'')]}">
-      <input type="text" name="range" placeholder="Range (CIDR)" value="@{[html_escape($filter{range}//'')]}">
-      <input type="text" name="scenario" placeholder="Scenario" value="@{[html_escape($filter{scenario}//'')]}">
-      <input type="text" name="type" placeholder="Type" value="@{[html_escape($filter{type}//'')]}">
-      <input type="text" name="origin" placeholder="Origin" value="@{[html_escape($filter{origin}//'')]}">
-      <button class="btn btn-primary btn-sm" type="submit">Apply</button>
-    </form>);
-    my ($ban_ct, $captcha_ct) = (0, 0);
-    for my $d (@$decisions) {
-        my $t = lc($d->{type} // 'ban');
-        if ($t eq 'captcha') { $captcha_ct++; } else { $ban_ct++; }
-    }
-    print <<HTML;
+print render_topbar("🚫", "Decisions", "", "decisions");
+print <<HTML;
+<div class="content">
   <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px">
-    <div class="stat-card danger"><div class="label">@{[$has_filter ? 'Matching Decisions' : 'Active Decisions']}</div>
+    <div class="stat-card danger"><div class="label">Active Decisions</div>
       <div class="value">$dec_cnt</div></div>
     <div class="stat-card"><div class="label">Bans</div>
-      <div class="value">$ban_ct</div></div>
+      <div class="value" id="ban-count">—</div></div>
     <div class="stat-card"><div class="label">Captchas</div>
-      <div class="value">$captcha_ct</div></div>
+      <div class="value" id="captcha-count">—</div></div>
   </div>
   <div class="card">
     <div class="card-header">
@@ -844,15 +710,12 @@ HTML
           <th>IP Address</th><th>Type</th><th>Engine</th><th>Duration</th><th>Scenario</th><th>Action</th>
         </tr></thead><tbody>';
         for my $d (@$decisions) {
-            my $ip_raw   = $d->{value}       // $d->{ip}      // '';
-            my $ip       = $ip_raw ne '' ? dive_link($ip_raw, ip => $ip_raw, tab => 'decisions') : '-';
+            my $ip       = html_escape($d->{value}        // $d->{ip}      // '-');
             my $type     = html_escape($d->{type}         // 'ban');
             my $origin   = html_escape($d->{origin}       // '-');
-            my $sc_raw   = $d->{scenario} // '';
-            my $scenario = $sc_raw ne '' ? dive_link($sc_raw, scenario => $sc_raw, tab => 'alerts') : '-';
+            my $scenario = html_escape($d->{scenario}     // '-');
             my $duration = html_escape($d->{duration}     // '-');
             my $id       = html_escape($d->{id}           // '');
-            my $ip_conf  = html_escape($ip_raw);
             my $type_cls = $type eq 'ban' ? 'ban' : 'captcha';
             # Highlight short durations in warning colour
             my $dur_cls  = ($duration =~ /^\d+m/ && $duration =~ /^(\d+)m/ && $1 < 60)
@@ -869,7 +732,7 @@ HTML
       <input type="hidden" name="action" value="delete_decision">
       <input type="hidden" name="id" value="$id">
       <button class="btn btn-danger btn-sm" type="submit"
-        onclick="return confirm('Delete decision for $ip_conf?')">🗑 Delete</button>
+        onclick="return confirm('Delete decision for $ip?')">🗑 Delete</button>
     </form>
   </td>
 </tr>
@@ -877,107 +740,27 @@ HTML
         }
         print '</tbody></table>';
     } else {
-        print '<div class="no-data">✓ No decisions match the current filter</div>';
+        print '<div class="no-data">✓ No active decisions</div>';
     }
     print '</div></div>'; # card + card-body
     print '</div>'; # content
-}
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TAB: ALERT DETAIL (drilldown - reached via the 🔍 link on an alert row)
-# ─────────────────────────────────────────────────────────────────────────────
-elsif ($tab eq 'alert_detail') {
-    my $detail_id = $in{'id'} // '';
-    $detail_id =~ s/[^0-9]//g;
-    my $detail = $detail_id ne '' ? get_alert_by_id($detail_id) : undef;
-
-    print <<HTML;
-<div class="topbar">
-  <div class="page-title"><span class="ico">🔎</span> Alert #@{[html_escape($detail_id)]}</div>
-  <div class="topbar-right">
-    <a href="index.cgi?tab=alerts" class="btn btn-ghost btn-sm">← Back to Alerts</a>
-  </div>
-</div>
-<div class="content">
+    # Count bans/captchas via JS
+    print <<'HTML';
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const rows = document.querySelectorAll('.tbl tbody tr');
+  let bans = 0, captchas = 0;
+  rows.forEach(r => {
+    const type = r.querySelector('.tag')?.textContent?.trim();
+    if (type === 'ban') bans++;
+    else captchas++;
+  });
+  document.getElementById('ban-count').textContent = bans;
+  document.getElementById('captcha-count').textContent = captchas;
+});
+</script>
 HTML
-    if (!$detail) {
-        print '<div class="no-data">Alert not found (it may have expired and been pruned from the local database).</div>';
-    } else {
-        my $sc      = $detail->{scenario} // '-';
-        my $msg     = html_escape($detail->{message}  // '-');
-        my $when    = html_escape($detail->{start_at} // '-');
-        my $stop    = html_escape($detail->{stop_at}  // '-');
-        my $ip_raw  = $detail->{source}{ip} // '';
-        my $cn      = html_escape($detail->{source}{cn} // '-');
-        my $as      = html_escape($detail->{source}{as_name} // $detail->{source}{as_number} // '-');
-        my $mid_raw = $detail->{machine_id} // $detail->{machineId} // '';
-
-        print <<HTML;
-  <div class="card" style="margin-bottom:20px">
-    <div class="card-header"><div class="card-title">📋 Overview</div></div>
-    <div class="card-body">
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px">
-        <div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Scenario</div>
-          <div>@{[dive_link($sc, scenario => $sc, tab => 'alerts')]}</div></div>
-        <div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Source IP</div>
-          <div class="mono">@{[$ip_raw ne '' ? dive_link($ip_raw, ip => $ip_raw, tab => 'alerts') : '-']}</div></div>
-        <div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Country / AS</div>
-          <div class="mono" style="font-size:12px">$cn · $as</div></div>
-        <div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Target Engine</div>
-          <div class="mono" style="font-size:12px">@{[$mid_raw ne '' ? dive_link((length($mid_raw)>20?'...'.substr($mid_raw,-4):$mid_raw), engine => $mid_raw, tab => 'alerts') : '-']}</div></div>
-        <div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Start</div>
-          <div class="mono" style="font-size:12px">$when</div></div>
-        <div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;margin-bottom:3px">Stop</div>
-          <div class="mono" style="font-size:12px">$stop</div></div>
-      </div>
-      <div style="margin-top:16px;font-size:12px;color:var(--text2)">$msg</div>
-    </div>
-  </div>
-HTML
-
-        my $decs = $detail->{decisions} // [];
-        print '<div class="card" style="margin-bottom:20px"><div class="card-header"><div class="card-title">🚫 Resulting Decisions</div></div><div class="card-body no-pad">';
-        if (@$decs) {
-            print '<table class="tbl"><thead><tr><th>Value</th><th>Type</th><th>Duration</th><th>Action</th></tr></thead><tbody>';
-            for my $d (@$decs) {
-                my $dval  = html_escape($d->{value}    // '-');
-                my $dtype = html_escape($d->{type}     // 'ban');
-                my $ddur  = html_escape($d->{duration} // '-');
-                my $did   = html_escape($d->{id}       // '');
-                print qq(<tr><td class="mono">$dval</td><td><span class="tag ban">$dtype</span></td><td class="mono">$ddur</td>
-                  <td><form method="post" action="action.cgi">
-                    <input type="hidden" name="action" value="delete_decision">
-                    <input type="hidden" name="id" value="$did">
-                    <button class="btn btn-danger btn-sm" type="submit" onclick="return confirm('Delete decision for $dval?')">🗑 Delete</button>
-                  </form></td></tr>);
-            }
-            print '</tbody></table>';
-        } else {
-            print '<div class="no-data">No decisions attached to this alert</div>';
-        }
-        print '</div></div>';
-
-        my $events = $detail->{events} // [];
-        print qq(<div class="card"><div class="card-header"><div class="card-title">📡 Events (@{[scalar @$events]})</div></div><div class="card-body no-pad">);
-        if (@$events) {
-            print '<table class="tbl"><thead><tr><th>Time</th><th>Meta</th></tr></thead><tbody>';
-            for my $e (@$events) {
-                my $ts = html_escape($e->{timestamp} // '-');
-                my @meta_bits;
-                for my $m (@{$e->{meta} // []}) {
-                    push @meta_bits, html_escape(($m->{key} // '?') . '=' . ($m->{value} // ''));
-                }
-                my $meta = join(', ', @meta_bits) || '-';
-                print qq(<tr><td class="mono" style="font-size:11px;white-space:nowrap">$ts</td><td style="font-size:11px;color:var(--text2)">$meta</td></tr>);
-            }
-            print '</tbody></table>';
-        } else {
-            print '<div class="no-data">No event detail available</div>';
-        }
-        print '</div></div>';
-    }
-    print '</div>'; # content
 }
 
 
@@ -1046,10 +829,10 @@ elsif ($tab eq 'metrics') {
         my $col   = $SC_COLORS[$ci++ % scalar @SC_COLORS];
         my $cnt   = $all_sc{$sc} || 0;
         my $pct   = $sc_total > 0 ? sprintf("%.1f", $cnt/$sc_total*100) : '0.0';
-        my $sc_link = dive_link($sc, scenario => $sc, tab => 'alerts');
+        my $sc_e  = html_escape($sc);
         my $cnt_f = fmt_num($cnt);
         $sc_tbl_html .= qq(<tr>
-          <td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:$col;margin-right:8px;vertical-align:middle"></span>$sc_link</td>
+          <td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:$col;margin-right:8px;vertical-align:middle"></span>$sc_e</td>
           <td class="mono" style="text-align:right">$cnt_f</td>
           <td class="mono" style="text-align:right;color:#6e7681">$pct%</td>
         </tr>);
@@ -1062,12 +845,9 @@ elsif ($tab eq 'metrics') {
     my @day_alerts = map { my $d=$_; my $sum=0; $sum += $_ for values %{$day_sc{$d}}; $sum } @day_labels;
 
     print <<HTML;
-<div class="topbar">
-  <div class="page-title"><span class="ico">📊</span> Remediation Metrics</div>
-  <div class="topbar-right">
-    <a href="index.cgi?tab=metrics" class="btn btn-ghost btn-sm">↺ Refresh</a>
-  </div>
-</div>
+HTML
+print render_topbar("📊", "Remediation Metrics", "", "metrics");
+print <<HTML;
 <div class="content">
   <p style="font-size:12px;color:var(--text3);margin-bottom:24px">
     See how CrowdSec protects your infrastructure by blocking malicious traffic.
@@ -1205,9 +985,8 @@ HTML
     }
     for my $ip (sort { $ip_as{$b}{count} <=> $ip_as{$a}{count} } keys %ip_as) {
         my $d = $ip_as{$ip};
-        my $ip_link = dive_link($ip, ip => $ip, tab => 'alerts');
         printf '<tr><td class="mono">%s</td><td style="font-size:11px;color:var(--text3)">%s</td><td>%s</td><td class="mono" style="text-align:right">%d</td></tr>',
-            $ip_link, html_escape($d->{as}), html_escape($d->{cn}), $d->{count};
+            html_escape($ip), html_escape($d->{as}), html_escape($d->{cn}), $d->{count};
     }
     print '</tbody></table></div></div>';
 
@@ -1220,34 +999,10 @@ HTML
     }
     for my $as (sort { $as_cnt{$b} <=> $as_cnt{$a} } keys %as_cnt) {
         my $pct = $alert_cnt > 0 ? sprintf("%.1f", $as_cnt{$as}/$alert_cnt*100) : '0.0';
-        my $as_link = $as eq '-' ? '-' : dive_link($as, as => $as, tab => 'alerts');
         printf '<tr><td>%s</td><td class="mono" style="text-align:right">%s</td><td class="mono" style="text-align:right;color:var(--text3)">%s%%</td></tr>',
-            $as_link, fmt_num($as_cnt{$as}), $pct;
+            html_escape($as), fmt_num($as_cnt{$as}), $pct;
     }
     print '</tbody></table></div></div></div>';  # two-col + content
-
-    # ── Per-bouncer breakdown (Bouncers tab links here via #bouncer-<slug>) ──
-    my $bmetrics = get_bouncer_metrics();
-    print '<div class="section-title">🔥 Remediation Components
-      <div class="section-sub">Per-bouncer breakdown - jump here from a bouncer on the Bouncers tab</div></div>';
-    print '<div class="card" style="margin-bottom:20px"><div class="card-body no-pad">';
-    if (@$bmetrics) {
-        print '<table class="tbl"><thead><tr><th>Bouncer</th><th style="text-align:right">Bytes dropped</th><th style="text-align:right">Packets dropped</th><th style="text-align:right">Requests</th><th></th></tr></thead><tbody>';
-        for my $bm (@$bmetrics) {
-            my $slug = slugify($bm->{name});
-            my $name = html_escape($bm->{name});
-            print qq(<tr id="bouncer-$slug"><td class="mono">$name</td>
-              <td class="mono" style="text-align:right">@{[fmt_bytes($bm->{bytes})]}</td>
-              <td class="mono" style="text-align:right">@{[fmt_num($bm->{packets})]}</td>
-              <td class="mono" style="text-align:right">@{[fmt_num($bm->{requests})]}</td>
-              <td><a class="dive" href="index.cgi?tab=bouncers#bouncer-row-$slug">🔥 View bouncer</a></td></tr>);
-        }
-        print '</tbody></table>';
-    } else {
-        print '<div class="no-data" style="padding:20px">No per-bouncer metrics reported - your cscli version may only expose aggregate totals.</div>';
-    }
-    print '</div></div>';
-
     print '</div>';
 } # end metrics tab
 
@@ -1257,12 +1012,9 @@ HTML
 # ─────────────────────────────────────────────────────────────────────────────
 elsif ($tab eq 'bouncers') {
     print <<HTML;
-<div class="topbar">
-  <div class="page-title"><span class="ico">🔥</span> Bouncers</div>
-  <div class="topbar-right">
-    <a href="index.cgi?tab=bouncers" class="btn btn-ghost btn-sm">↺ Refresh</a>
-  </div>
-</div>
+HTML
+print render_topbar("🔥", "Bouncers", "", "bouncers");
+print <<HTML;
 <div class="content">
 HTML
     # Service control cards
@@ -1305,10 +1057,9 @@ HTML
     <div class="card-body no-pad">
 HTML
     if (@$bouncers) {
-        print '<table class="tbl"><thead><tr><th>Name</th><th>IP</th><th>Type</th><th>Version</th><th>Last Pull</th><th>Status</th><th></th></tr></thead><tbody>';
+        print '<table class="tbl"><thead><tr><th>Name</th><th>IP</th><th>Type</th><th>Version</th><th>Last Pull</th><th>Status</th></tr></thead><tbody>';
         for my $b (@$bouncers) {
-            my $bname_raw = $b->{name} // '-';
-            my $bname   = html_escape($bname_raw);
+            my $bname   = html_escape($b->{name}          // '-');
             my $bip     = html_escape($b->{ip_address}    // $b->{ipAddress} // '-');
             my $btype   = html_escape($b->{type}          // '-');
             my $bver    = html_escape($b->{version}       // '-');
@@ -1316,13 +1067,10 @@ HTML
             my $bactive = $b->{isValid} // $b->{is_valid} // 1;
             my $bst_cls = $bactive ? 'tag active' : 'tag inactive';
             my $bst_lbl = $bactive ? 'OK' : 'REVOKED';
-            my $slug    = slugify($bname_raw);
-            my $metlink = $bname_raw ne '-' ? qq(<a class="dive" href="index.cgi?tab=metrics#bouncer-$slug">📊 Metrics</a>) : '';
-            print "<tr id='bouncer-row-$slug'><td class='mono'>$bname</td><td class='mono'>$bip</td>
+            print "<tr><td class='mono'>$bname</td><td class='mono'>$bip</td>
               <td>$btype</td><td class='mono'>$bver</td>
               <td style='font-size:11px;color:var(--text3)'>$blp</td>
-              <td><span class='$bst_cls'>$bst_lbl</span></td>
-              <td>$metlink</td></tr>";
+              <td><span class='$bst_cls'>$bst_lbl</span></td></tr>";
         }
         print '</tbody></table>';
     } else {
@@ -1337,16 +1085,14 @@ HTML
 elsif ($tab eq 'hub') {
     my $hub_json   = `cscli hub list -o json 2>/dev/null`;
     my $hub_data   = load_json($hub_json) // {};
-    my $view       = $in{'view'} || 'collections';
-    $view = 'collections' unless $view =~ /^(scenarios|parsers|collections|postoverflows)$/;
+    my $coll_json  = `cscli collections list -o json 2>/dev/null`;
+    my $coll_data  = load_json($coll_json) // [];
+    $coll_data = $coll_data->{collections} if ref $coll_data eq 'HASH';
 
     print <<HTML;
-<div class="topbar">
-  <div class="page-title"><span class="ico">📦</span> Hub</div>
-  <div class="topbar-right">
-    <a href="index.cgi?tab=hub&view=$view" class="btn btn-ghost btn-sm">↺ Refresh</a>
-  </div>
-</div>
+HTML
+print render_topbar("📦", "Hub", "", "hub");
+print <<HTML;
 <div class="content">
   <div class="stat-grid">
 HTML
@@ -1354,121 +1100,34 @@ HTML
                      ['collections','📦 Collections'],['postoverflows','📤 Post-overflows']) {
         my ($key, $lbl) = @$section;
         my $cnt = ref $hub_data->{$key} eq 'ARRAY' ? scalar @{$hub_data->{$key}} : 0;
-        my $active_style = $view eq $key ? ' style="border-color:var(--accent)"' : '';
-        print qq(<a class='stat-card' href="index.cgi?tab=hub&view=$key"$active_style>
-          <div class='label'>$lbl</div><div class='value'>$cnt</div></a>);
+        print "<div class='stat-card'><div class='label'>$lbl</div><div class='value'>$cnt</div></div>";
     }
     print '</div>';
 
-    if ($view eq 'scenarios') {
-        my $scenarios = get_scenario_list();
-        print <<HTML;
-  <div class="card">
-    <div class="card-header"><div class="card-title">🎯 Installed Scenarios</div>
-      <span style="font-size:11px;color:var(--text3)">Click a scenario to see its recent alerts</span></div>
-    <div class="card-body no-pad">
-HTML
-        if (@$scenarios) {
-            print '<table class="tbl"><thead><tr><th>Name</th><th>Version</th><th>Status</th><th>Description</th></tr></thead><tbody>';
-            for my $s (@$scenarios) {
-                my $name  = $s->{name} // '-';
-                my $ver   = html_escape($s->{local_version} // $s->{version} // '-');
-                my $desc  = html_escape($s->{description} // '-');
-                my $cls   = ($s->{status} // '') =~ /enabled/i ? 'tag active' : 'tag inactive';
-                my $lbl   = html_escape($s->{status} // 'enabled');
-                my $link  = $name eq '-' ? '-' : dive_link($name, scenario => $name, tab => 'alerts');
-                print "<tr><td class='mono'>$link</td><td class='mono'>$ver</td>
-                  <td><span class='$cls'>$lbl</span></td>
-                  <td style='font-size:11px;color:var(--text3)'>$desc</td></tr>";
-            }
-            print '</tbody></table>';
-        } else {
-            print '<div class="no-data" style="padding:20px">No scenarios reported by <code>cscli scenarios list</code>.</div>';
-            print debug_raw_snippet('scenarios');
-        }
-        print '</div></div>';
-    }
-    elsif ($view eq 'parsers') {
-        my $parsers = get_parser_list();
-        print <<HTML;
-  <div class="card">
-    <div class="card-header"><div class="card-title">🔍 Installed Parsers</div></div>
-    <div class="card-body no-pad">
-HTML
-        if (@$parsers) {
-            print '<table class="tbl"><thead><tr><th>Name</th><th>Version</th><th>Status</th><th>Description</th></tr></thead><tbody>';
-            for my $p (@$parsers) {
-                my $name = html_escape($p->{name} // '-');
-                my $ver  = html_escape($p->{local_version} // $p->{version} // '-');
-                my $desc = html_escape($p->{description} // '-');
-                my $cls  = ($p->{status} // '') =~ /enabled/i ? 'tag active' : 'tag inactive';
-                my $lbl  = html_escape($p->{status} // 'enabled');
-                print "<tr><td class='mono'>$name</td><td class='mono'>$ver</td>
-                  <td><span class='$cls'>$lbl</span></td>
-                  <td style='font-size:11px;color:var(--text3)'>$desc</td></tr>";
-            }
-            print '</tbody></table>';
-        } else {
-            print '<div class="no-data" style="padding:20px">No parsers reported by <code>cscli parsers list</code>.</div>';
-            print debug_raw_snippet('parsers');
-        }
-        print '</div></div>';
-    }
-    elsif ($view eq 'postoverflows') {
-        my $pofs = get_postoverflow_list();
-        print <<HTML;
-  <div class="card">
-    <div class="card-header"><div class="card-title">📤 Installed Post-overflows</div></div>
-    <div class="card-body no-pad">
-HTML
-        if (@$pofs) {
-            print '<table class="tbl"><thead><tr><th>Name</th><th>Version</th><th>Status</th><th>Description</th></tr></thead><tbody>';
-            for my $p (@$pofs) {
-                my $name = html_escape($p->{name} // '-');
-                my $ver  = html_escape($p->{local_version} // $p->{version} // '-');
-                my $desc = html_escape($p->{description} // '-');
-                my $cls  = ($p->{status} // '') =~ /enabled/i ? 'tag active' : 'tag inactive';
-                my $lbl  = html_escape($p->{status} // 'enabled');
-                print "<tr><td class='mono'>$name</td><td class='mono'>$ver</td>
-                  <td><span class='$cls'>$lbl</span></td>
-                  <td style='font-size:11px;color:var(--text3)'>$desc</td></tr>";
-            }
-            print '</tbody></table>';
-        } else {
-            print '<div class="no-data" style="padding:20px">No post-overflows reported by <code>cscli postoverflows list</code>.</div>';
-            print debug_raw_snippet('postoverflows');
-        }
-        print '</div></div>';
-    }
-    else { # collections (default)
-        my $coll_data = get_collection_list();
-        print <<HTML;
+    # Collections table
+    print <<HTML;
   <div class="card">
     <div class="card-header"><div class="card-title">📦 Installed Collections</div></div>
     <div class="card-body no-pad">
 HTML
-        if (@$coll_data) {
-            print '<table class="tbl"><thead><tr><th>Name</th><th>Version</th><th>Status</th><th>Description</th></tr></thead><tbody>';
-            for my $c (@$coll_data) {
-                my $cname = html_escape($c->{name}        // '-');
-                my $cver  = html_escape($c->{version}     // '-');
-                my $cdesc = html_escape($c->{description} // '-');
-                my $cupd  = ($c->{local_version} // '') ne ($c->{version} // '') ? 'tag warn' : 'tag active';
-                my $clbl  = $c->{status} // 'enabled';
-                print "<tr><td class='mono'>$cname</td><td class='mono'>$cver</td>
-                  <td><span class='$cupd'>$clbl</span></td>
-                  <td style='font-size:11px;color:var(--text3)'>$cdesc</td></tr>";
-            }
-            print '</tbody></table>';
-        } else {
-            # Fallback: show raw hub counts
-            print '<div class="no-data" style="padding:20px">Run <code style="font-family:var(--mono)">cscli hub list</code> on the server to see installed items.</div>';
-            print debug_raw_snippet('collections');
+    if (ref $coll_data eq 'ARRAY' && @$coll_data) {
+        print '<table class="tbl"><thead><tr><th>Name</th><th>Version</th><th>Status</th><th>Description</th></tr></thead><tbody>';
+        for my $c (@$coll_data) {
+            my $cname = html_escape($c->{name}        // '-');
+            my $cver  = html_escape($c->{version}     // '-');
+            my $cdesc = html_escape($c->{description} // '-');
+            my $cupd  = ($c->{local_version} // '') ne ($c->{version} // '') ? 'tag warn' : 'tag active';
+            my $clbl  = $c->{status} // 'enabled';
+            print "<tr><td class='mono'>$cname</td><td class='mono'>$cver</td>
+              <td><span class='$cupd'>$clbl</span></td>
+              <td style='font-size:11px;color:var(--text3)'>$cdesc</td></tr>";
         }
-        print '</div>';
-        print '<p style="font-size:11px;color:var(--text3);margin-top:10px">A collection bundles multiple scenarios/parsers — switch to the <a class="dive" href="index.cgi?tab=hub&view=scenarios">Scenarios view</a> above to dive into individual scenarios and their alerts.</p>';
-        print '</div>'; # content
+        print '</tbody></table>';
+    } else {
+        # Fallback: show raw hub counts
+        print '<div class="no-data" style="padding:20px">Run <code style="font-family:var(--mono)">cscli hub list</code> on the server to see installed items.</div>';
     }
+    print '</div></div></div>'; # card + content
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1476,12 +1135,9 @@ HTML
 # ─────────────────────────────────────────────────────────────────────────────
 elsif ($tab eq 'services') {
     print <<HTML;
-<div class="topbar">
-  <div class="page-title"><span class="ico">🔧</span> Services</div>
-  <div class="topbar-right">
-    <a href="index.cgi?tab=services" class="btn btn-ghost btn-sm">↺ Refresh</a>
-  </div>
-</div>
+HTML
+print render_topbar("🔧", "Services", "", "services");
+print <<HTML;
 <div class="content">
 HTML
     for my $svc (['crowdsec','⚙️','CrowdSec Engine','Main detection engine'],
@@ -1491,9 +1147,6 @@ HTML
         my $err = get_service_errors($name);
         my $scls= $st eq 'active' ? 'tag active' : ($st eq 'inactive' ? 'tag inactive' : 'tag');
         my $slbl= $st eq 'active' ? '● RUNNING'  : ($st eq 'inactive' ? '● STOPPED'   : '? UNKNOWN');
-        my $related = $name eq 'crowdsec'
-            ? qq(<a class="dive" href="index.cgi?tab=engines">⚙️ View engines</a>)
-            : qq(<a class="dive" href="index.cgi?tab=bouncers">🔥 View bouncers</a> &nbsp;·&nbsp; <a class="dive" href="index.cgi?tab=metrics#bouncer-@{[slugify($name)]}">📊 View metrics</a>);
         print <<HTML;
   <div class="card" style="margin-bottom:16px">
     <div class="card-header">
@@ -1510,7 +1163,7 @@ HTML
       </div>
     </div>
     <div class="card-body">
-      <p style="font-size:12px;color:var(--text3);margin-bottom:12px">$desc &nbsp;·&nbsp; <code style="font-family:var(--mono);font-size:11px">$name.service</code> &nbsp;·&nbsp; $related</p>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:12px">$desc &nbsp;·&nbsp; <code style="font-family:var(--mono);font-size:11px">$name.service</code></p>
 HTML
         if ($err) {
             print qq(<div class="err-label">⚠ Recent Errors</div><div class="err-box">$err</div>);
@@ -1527,23 +1180,6 @@ print '</div></div>'; # .main + .shell
 
 print <<'HTML';
 <script>
-// ── Mobile sidebar drawer ──────────────────────────────────────────────────
-function toggleSidebar() {
-  var sb = document.querySelector('.sidebar');
-  var ov = document.getElementById('sidebar-overlay');
-  if (!sb || !ov) return;
-  sb.classList.toggle('open');
-  ov.classList.toggle('open');
-}
-window.addEventListener('resize', function() {
-  if (window.innerWidth > 900) {
-    var sb = document.querySelector('.sidebar');
-    var ov = document.getElementById('sidebar-overlay');
-    if (sb) sb.classList.remove('open');
-    if (ov) ov.classList.remove('open');
-  }
-});
-
 // ── Responsive viz-grid ───────────────────────────────────────────────────────
 function applyGridLayout() {
   var grid = document.querySelector('.viz-grid');

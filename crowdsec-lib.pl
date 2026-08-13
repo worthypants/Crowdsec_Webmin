@@ -9,56 +9,13 @@ our %text;
 &load_language('crowdsec');
 
 # ── JSON loader ───────────────────────────────────────────────────────────────
-# ── JSON loader ───────────────────────────────────────────────────────────────
 sub load_json {
     my ($json) = @_;
     return undef unless defined $json && $json =~ /^\s*[\[\{]/;
-    # Prefer JSON.pm (faster) but fall back to JSON::PP (core, always
-    # available). Resolve a real code ref rather than relying on import(),
-    # so this works correctly regardless of which one is actually present.
-    my $decoder;
-    eval { require JSON; $decoder = \&JSON::decode_json; 1 }
-        or eval { require JSON::PP; $decoder = \&JSON::PP::decode_json; 1 };
-    return undef unless $decoder;
-    my $data = eval { $decoder->($json) };
+    eval { require JSON; };
+    if ($@) { eval { require JSON::PP; JSON::PP->import('decode_json'); }; }
+    my $data = eval { JSON::decode_json($json) };
     return $data;
-}
-
-# ── Safe cscli execution ──────────────────────────────────────────────────────
-# Runs cscli with an argv list via list-form open() - this execs the binary
-# directly, bypassing the shell entirely, so filter values (which now come
-# from URL query params driving the alerts/decisions tabs) can never be
-# used for command injection no matter what characters they contain.
-sub run_cscli_json {
-    my (@args) = @_;
-    my @cmd = ('cscli', @args, '-o', 'json');
-    my $pid = open(my $fh, '-|');
-    return undef unless defined $pid;
-    if ($pid == 0) {
-        open(STDIN,  '<', '/dev/null');
-        open(STDERR, '>', '/dev/null');
-        exec(@cmd) or exit(127);
-    }
-    local $/;
-    my $out = <$fh>;
-    close $fh;
-    return $out;
-}
-
-# Builds a safe argv fragment from a filter hashref, translating only known
-# keys to their cscli flag. Unknown keys are silently ignored, so a filter
-# hash built straight from %in can never inject an arbitrary flag.
-sub _filter_args {
-    my ($filters, $map) = @_;
-    my @args;
-    return @args unless ref $filters eq 'HASH';
-    for my $key (sort keys %$map) {
-        my $val = $filters->{$key};
-        next unless defined $val && $val ne '';
-        push @args, $map->{$key}, $val;
-    }
-    push @args, '--all' if $filters->{all};
-    return @args;
 }
 
 # ── Service ───────────────────────────────────────────────────────────────────
@@ -75,105 +32,19 @@ sub get_service_errors {
 }
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
-# get_alerts_detail($since, \%filters) - $since defaults to '24h' as before.
-# %filters (all optional): ip, range, scope, scenario, type, origin, until, all.
-# Note: cscli alerts list has no flag for filtering by target engine or by AS -
-# those are applied as a post-filter in index.cgi after fetching.
-my %ALERT_FILTER_MAP = (
-    range    => '--range',
-    scope    => '--scope',
-    scenario => '--scenario',
-    type     => '--type',
-    origin   => '--origin',
-    until    => '--until',
-    ip       => '--ip',
-);
-
 sub get_alerts_detail {
-    my ($since, $filters) = @_;
-    $since ||= '24h';
-    my @args = ('alerts', 'list', '--since', $since, _filter_args($filters, \%ALERT_FILTER_MAP));
-    my $json = run_cscli_json(@args);
+    my ($since) = @_; $since ||= '24h';
+    my $json = `cscli alerts list -o json --since $since 2>/dev/null`;
     my $data = load_json($json);
     return ref $data eq 'ARRAY' ? $data : [];
 }
 
-# Fetch a single alert with its full event/decision detail, for the
-# alert-detail drill-down view.
-sub get_alert_by_id {
-    my ($id) = @_;
-    return undef unless defined $id && $id =~ /^\d+$/;
-    my $json = run_cscli_json('alerts', 'inspect', $id, '--details');
-    return load_json($json);
-}
-
 # ── Decisions ─────────────────────────────────────────────────────────────────
-# get_decisions(\%filters) - %filters (all optional): ip, range, scope, value,
-# scenario, type, origin, since, until, all.
-my %DECISION_FILTER_MAP = (
-    range    => '--range',
-    scope    => '--scope',
-    value    => '--value',
-    scenario => '--scenario',
-    type     => '--type',
-    origin   => '--origin',
-    since    => '--since',
-    until    => '--until',
-    ip       => '--ip',
-);
-
 sub get_decisions {
-    my ($filters) = @_;
-    my @args = ('decisions', 'list', _filter_args($filters, \%DECISION_FILTER_MAP));
-    my $json = run_cscli_json(@args);
+    my $json = `cscli decisions list -o json 2>/dev/null`;
     my $data = load_json($json);
-    if (ref $data eq 'HASH' && ref $data->{rows} eq 'ARRAY') { $data = $data->{rows}; }
-    return [] unless ref $data eq 'ARRAY';
-
-    # Known cscli bug (upstream crowdsecurity/crowdsec#4293): on some
-    # versions, `cscli decisions list -o json` returns ALERT objects
-    # (scenario/source/decisions[]) instead of DECISION objects
-    # (origin/scope/value/until). That shape has no top-level "value" but
-    # does have an embedded "decisions" array - detect it and flatten, so
-    # the Decisions tab still shows real IPs/origins instead of "-".
-    if (@$data && ref $data->[0] eq 'HASH' && !exists $data->[0]{value} && ref $data->[0]{decisions} eq 'ARRAY') {
-        my @flat;
-        for my $alert (@$data) {
-            my $src_ip = $alert->{source}{ip};
-            for my $d (@{$alert->{decisions} || []}) {
-                push @flat, {
-                    id       => $d->{id},
-                    value    => $d->{value} // $src_ip,
-                    type     => $d->{type},
-                    scope    => $d->{scope},
-                    origin   => $d->{origin},
-                    scenario => $d->{scenario} // $alert->{scenario},
-                    duration => $d->{duration},
-                    alert_id => $alert->{id},
-                };
-            }
-        }
-        return \@flat;
-    }
-    return $data;
-}
-
-# Delete a single decision by numeric ID. Moved here from action.cgi so both
-# the row-level delete button and any future bulk action share one safe path.
-sub delete_decision_by_id {
-    my ($id) = @_;
-    return (0, 'invalid id') unless defined $id && $id =~ /^\d+$/;
-    my $pid = open(my $fh, '-|');
-    return (0, "fork failed: $!") unless defined $pid;
-    if ($pid == 0) {
-        open(STDERR, '>&STDOUT');
-        exec('cscli', 'decisions', 'delete', '--id', $id) or exit(127);
-    }
-    local $/;
-    my $out = <$fh>;
-    close $fh;
-    my $rc = $? >> 8;
-    return ($rc == 0 ? 1 : 0, $rc == 0 ? undef : $out);
+    if (ref $data eq 'HASH' && ref $data->{rows} eq 'ARRAY') { return $data->{rows}; }
+    return ref $data eq 'ARRAY' ? $data : [];
 }
 
 # ── Metrics ───────────────────────────────────────────────────────────────────
@@ -328,97 +199,6 @@ sub get_bouncers {
     return ref $data eq 'ARRAY' ? $data : [];
 }
 
-# ── Hub content lists (used by the Hub tab's per-type drilldown views) ───────
-# `cscli hub list -o json` wraps content type-keyed: {"scenarios":[...],...}.
-# The individual `cscli <type> list -o json` commands are documented the
-# same way in some versions but return a bare array in others - unwrap
-# whichever shape actually comes back instead of assuming one.
-sub _unwrap_hub_items {
-    my ($data, $key) = @_;
-    return [] unless defined $data;
-    return $data if ref $data eq 'ARRAY';
-    if (ref $data eq 'HASH') {
-        return $data->{$key}  if ref $data->{$key}  eq 'ARRAY';
-        return $data->{rows}  if ref $data->{rows}  eq 'ARRAY';
-    }
-    return [];
-}
-
-sub get_scenario_list {
-    my $json = run_cscli_json('scenarios', 'list');
-    return _unwrap_hub_items(load_json($json), 'scenarios');
-}
-
-sub get_parser_list {
-    my $json = run_cscli_json('parsers', 'list');
-    return _unwrap_hub_items(load_json($json), 'parsers');
-}
-
-sub get_postoverflow_list {
-    my $json = run_cscli_json('postoverflows', 'list');
-    return _unwrap_hub_items(load_json($json), 'postoverflows');
-}
-
-sub get_collection_list {
-    my $json = run_cscli_json('collections', 'list');
-    return _unwrap_hub_items(load_json($json), 'collections');
-}
-
-# Raw JSON for a hub list command, exposed so the UI can show a debug
-# snippet when parsing comes back empty - useful for diagnosing an
-# unexpected shape on a given cscli version without guessing blind.
-sub get_hub_list_raw {
-    my ($type) = @_;
-    return run_cscli_json($type, 'list') // '';
-}
-
-# ── Per-bouncer metric breakdown (Bouncers <-> Metrics dive-through) ─────────
-# Same tolerant multi-format parsing as parse_bouncer_metrics(), but keeps
-# the per-bouncer rows instead of collapsing them into one set of totals.
-sub get_bouncer_metrics {
-    my $json = `cscli metrics -o json 2>/dev/null`;
-    my $data = load_json($json);
-    my @rows;
-
-    if (ref $data eq 'HASH' && ref $data->{bouncers} eq 'HASH') {
-        for my $name (sort keys %{$data->{bouncers}}) {
-            my $b = $data->{bouncers}{$name};
-            push @rows, {
-                name     => $name,
-                bytes    => $b->{dropped_bytes}   || $b->{bytes_written}   || 0,
-                packets  => $b->{dropped_packets} || $b->{packets_written} || 0,
-                requests => $b->{requests_count}  || $b->{req_processed}   || 0,
-            };
-        }
-    } elsif (ref $data eq 'HASH' && ref $data->{remediation_components} eq 'ARRAY') {
-        for my $b (@{$data->{remediation_components}}) {
-            push @rows, {
-                name     => $b->{name} || $b->{bouncer_name} || 'unknown',
-                bytes    => $b->{dropped_bytes}   || 0,
-                packets  => $b->{dropped_packets} || 0,
-                requests => $b->{requests_count}  || 0,
-            };
-        }
-    } elsif (ref $data eq 'ARRAY') {
-        for my $b (@$data) {
-            push @rows, {
-                name     => $b->{name} || 'unknown',
-                bytes    => $b->{dropped_bytes}   || 0,
-                packets  => $b->{dropped_packets} || 0,
-                requests => $b->{requests_count}  || 0,
-            };
-        }
-    }
-    return \@rows;
-}
-
-# URL/anchor-safe slug for linking a bouncer row to its metrics anchor.
-sub slugify {
-    my ($s) = @_; $s //= '';
-    $s =~ s/[^A-Za-z0-9_-]+/-/g;
-    return lc($s);
-}
-
 # ── Format helpers ────────────────────────────────────────────────────────────
 sub fmt_bytes {
     my ($b) = @_; $b ||= 0;
@@ -557,3 +337,60 @@ sub get_timeline_data {
     my @s2 = map { {t=>$_, v=>$b2{$_}} } sort keys %b2;
     return (\@s1, \@s2);
 }
+
+# ── CIDR / IP range filtering ─────────────────────────────────────────────────
+
+# Convert a CIDR string like "1.2.3.0/24" or a plain IP "1.2.3.4"
+# into (network_int, mask_int) pair for fast matching.
+sub _cidr_to_range {
+    my ($cidr) = @_;
+    $cidr =~ s/\s+//g;
+    my ($ip_str, $prefix) = split '/', $cidr;
+    $prefix //= 32;
+    my @octs = split /\./, $ip_str;
+    return () unless @octs == 4;
+    my $ip_int = 0;
+    for my $o (@octs) { $ip_int = ($ip_int << 8) | ($o & 0xFF); }
+    my $mask = $prefix == 0 ? 0 : (0xFFFFFFFF << (32 - $prefix)) & 0xFFFFFFFF;
+    my $net  = $ip_int & $mask;
+    return ($net, $mask);
+}
+
+# Return 1 if $ip_str falls within any of the @cidrs
+sub ip_in_cidrs {
+    my ($ip_str, @cidrs) = @_;
+    return 0 unless defined $ip_str && $ip_str =~ /^\d+\.\d+\.\d+\.\d+$/;
+    my @octs = split /\./, $ip_str;
+    return 0 unless @octs == 4;
+    my $ip_int = 0;
+    for my $o (@octs) { $ip_int = ($ip_int << 8) | ($o & 0xFF); }
+    for my $cidr (@cidrs) {
+        my ($net, $mask) = _cidr_to_range($cidr);
+        next unless defined $mask;
+        return 1 if ($ip_int & $mask) == $net;
+    }
+    return 0;
+}
+
+# Filter an alerts array, removing any alert whose source IP is in @exclude_cidrs.
+# Also excludes alerts where source value (for ranges) starts with an excluded prefix.
+sub filter_alerts {
+    my ($alerts, @exclude_cidrs) = @_;
+    return $alerts unless @exclude_cidrs;
+    my @out;
+    for my $a (@$alerts) {
+        my $ip  = $a->{source}{ip}    // '';
+        my $val = $a->{source}{value} // $ip;
+        # Check plain IP
+        next if $ip  && ip_in_cidrs($ip,  @exclude_cidrs);
+        # Check range-type alerts (value = "1.2.3.0/24")
+        if ($val =~ m{^(\d+\.\d+\.\d+\.\d+)(?:/\d+)?$}) {
+            next if ip_in_cidrs($1, @exclude_cidrs);
+        }
+        push @out, $a;
+    }
+    return \@out;
+}
+
+# The two test ranges for earth.gnos1s.com
+our @TEST_IP_RANGES = ('1.2.3.0/24', '192.0.2.0/24');

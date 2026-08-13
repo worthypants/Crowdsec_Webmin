@@ -1,6 +1,7 @@
+name=crowdsec
 desc=CrowdSec Security Engine
-desc_de=CrowdSec Sicherheits-Engine
-longdesc=Monitor and manage a self-hosted CrowdSec security engine: live alerts, active decisions, bouncers, hub content (scenarios/parsers/collections), and remediation metrics, with a clickable dashboard for drilling from any alert, IP, scenario, or bouncer into a filtered view.
-category=net
+longdesc=Monitor and manage CrowdSec intrusion detection and prevention
+category=security
+version=1.0
 os_support=*-linux
-depends_on=
+usermin=0

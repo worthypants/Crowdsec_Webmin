@@ -1,0 +1,3 @@
+crowdsec=1
+crowdsec-firewall-bouncer=1
+actions=start stop restart

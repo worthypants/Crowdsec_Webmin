@@ -18,17 +18,12 @@ unless ($ok_act{$action}) {
 
 if ($action eq 'delete_decision') {
     $id =~ s/[^0-9]//g;  # numeric only
-    # Preserve whatever filter the decisions view was showing when the
-    # delete was triggered, so the redirect lands back on the same filtered
-    # list instead of resetting to the unfiltered default.
-    my @filter_keys = qw(ip range scope value scenario type origin since until);
-    my $qs = join('&', map { defined $in{$_} && $in{$_} ne '' ? "$_=" . uri_escape($in{$_}) : () } @filter_keys);
-    $qs = "&$qs" if $qs;
     if ($id) {
-        my ($ok, $err) = delete_decision_by_id($id);
-        &redirect("index.cgi?tab=decisions" . $qs . '&' . ($ok ? "deleted=1" : "err=" . uri_escape($err // 'delete failed')));
+        my $out = `cscli decisions delete --id \Q$id\E 2>&1`;
+        my $rc = $? >> 8;
+        &redirect("index.cgi?tab=decisions&" . ($rc==0 ? "deleted=1" : "err=".uri_escape($out)));
     } else {
-        &redirect("index.cgi?tab=decisions" . $qs . "&err=invalid_id");
+        &redirect("index.cgi?tab=decisions&err=invalid_id");
     }
     exit 0;
 }

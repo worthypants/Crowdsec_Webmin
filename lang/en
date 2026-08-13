@@ -1,1 +1,10 @@
-index_title=CrowdSec Security Engine
+title=CrowdSec Security Dashboard
+index=Dashboard
+start=Start
+stop=Stop
+restart=Restart
+status_running=Running
+status_stopped=Stopped
+status_unknown=Unknown
+err_service=Unknown service
+err_action=Unknown action
