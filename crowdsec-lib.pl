@@ -440,7 +440,7 @@ sub get_timeline_data {
 
 # ── CIDR / IP range filtering ─────────────────────────────────────────────────
 
-# Convert a CIDR string like "1.2.3.0/24" or a plain IP "1.2.3.4"
+# Convert a CIDR string like "198.51.100.0/24" or a plain IP "1.2.3.4"
 # into (network_int, mask_int) pair for fast matching.
 sub _cidr_to_range {
     my ($cidr) = @_;
@@ -496,7 +496,7 @@ sub filter_alerts {
 }
 
 # The two test ranges for earth.gnos1s.com
-our @TEST_IP_RANGES = ('1.2.3.0/24', '192.0.2.0/24');
+our @TEST_IP_RANGES = ('198.51.100.0/24', '192.0.2.0/24');
 
 # ── Config via Webmin's native %config (populated by init_config in web-lib.pl) ─
 # Saved with save_module_config() in config.cgi → /etc/webmin/crowdsec/config
@@ -510,7 +510,7 @@ sub get_test_ip_ranges {
         my %mc = &get_module_config();
         $ranges = $mc{test_ip_ranges};
     }
-    $ranges //= '1.2.3.0/24 192.0.2.0/24';
+    $ranges //= '198.51.100.0/24 192.0.2.0/24';
     # Type 9 (multiline textarea) stores newlines as spaces
     # Handle all separator formats
     $ranges =~ s/\\n/ /g;
