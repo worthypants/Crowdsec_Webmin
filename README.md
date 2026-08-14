@@ -12,5 +12,5 @@ There are no data rate limits like the equivalent cloud console.
 Install:
   Go to Webmin -> Webmin Configuration -> Webmin Modules -> Install -> From uploaded file. 
   Simply upload the crowdsec.tar.gz file.
-  The new module should appear under either the Networking tab.
+  The new module should appear under the Networking tab.
 
