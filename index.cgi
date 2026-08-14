@@ -448,18 +448,58 @@ if ($tab eq 'engines') {
     my $bl_cnt  = $hub->{collections} || 0;
 
     print <<HTML;
-  <div class="stat-grid">
-    <div class="stat-card accent" title="Local engine detections — higher than app.crowdsec.net which only shows CAPI-reported alerts (after noise cancelling &amp; quota)">
-      <div class="label">Alerts · 24h <span style="font-size:9px;opacity:.6">LOCAL</span></div>
-      <div class="value">$alert_cnt</div><div class="sub">All local detections</div></div>
-    <div class="stat-card"><div class="label">Engines</div>
-      <div class="value">@{[scalar @$engines]}</div><div class="sub">$online active</div></div>
-    <div class="stat-card"><div class="label">Decisions</div>
-      <div class="value">$dec_cnt</div><div class="sub">Active bans</div></div>
-    <div class="stat-card"><div class="label">Scenarios</div>
-      <div class="value">$sc_cnt</div><div class="sub">Installed</div></div>
-    <div class="stat-card"><div class="label">Bouncers</div>
-      <div class="value">@{[scalar @$bouncers]}</div><div class="sub">Remediation</div></div>
+  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:24px">
+
+    <a href="index.cgi?tab=alerts$qs_filter" style="text-decoration:none">
+    <div style="background:rgba(108,99,255,0.1);border:1px solid rgba(108,99,255,0.35);
+      border-radius:10px;padding:18px 16px;cursor:pointer;transition:all .15s"
+      onmouseover="this.style.background='rgba(108,99,255,0.18)';this.style.borderColor='rgba(108,99,255,.6)'"
+      onmouseout="this.style.background='rgba(108,99,255,0.1)';this.style.borderColor='rgba(108,99,255,.35)'">
+      <div style="font-size:11px;color:#a99cff;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">🔔 Alerts · 24h</div>
+      <div style="font-size:32px;font-weight:700;font-family:var(--mono);color:var(--accent);line-height:1">$alert_cnt</div>
+      <div style="font-size:11px;color:#6e7681;margin-top:6px">All local detections</div>
+    </div></a>
+
+    <a href="index.cgi?tab=engines$qs_filter" style="text-decoration:none">
+    <div style="background:var(--surface);border:1px solid var(--border);
+      border-radius:10px;padding:18px 16px;cursor:pointer;transition:all .15s"
+      onmouseover="this.style.borderColor='rgba(108,99,255,.5)';this.style.background='rgba(108,99,255,0.06)'"
+      onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--surface)'">
+      <div style="font-size:11px;color:#8b949e;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">⚙️ Engines</div>
+      <div style="font-size:32px;font-weight:700;font-family:var(--mono);color:#e6edf3;line-height:1">@{[scalar @$engines]}</div>
+      <div style="font-size:11px;color:#6e7681;margin-top:6px">$online active</div>
+    </div></a>
+
+    <a href="index.cgi?tab=decisions$qs_filter" style="text-decoration:none">
+    <div style="background:var(--surface);border:1px solid var(--border);
+      border-radius:10px;padding:18px 16px;cursor:pointer;transition:all .15s"
+      onmouseover="this.style.borderColor='rgba(108,99,255,.5)';this.style.background='rgba(108,99,255,0.06)'"
+      onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--surface)'">
+      <div style="font-size:11px;color:#8b949e;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">🚫 Decisions</div>
+      <div style="font-size:32px;font-weight:700;font-family:var(--mono);color:#e6edf3;line-height:1">$dec_cnt</div>
+      <div style="font-size:11px;color:#6e7681;margin-top:6px">Active bans</div>
+    </div></a>
+
+    <a href="index.cgi?tab=hub$qs_filter" style="text-decoration:none">
+    <div style="background:var(--surface);border:1px solid var(--border);
+      border-radius:10px;padding:18px 16px;cursor:pointer;transition:all .15s"
+      onmouseover="this.style.borderColor='rgba(108,99,255,.5)';this.style.background='rgba(108,99,255,0.06)'"
+      onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--surface)'">
+      <div style="font-size:11px;color:#8b949e;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">🎯 Scenarios</div>
+      <div style="font-size:32px;font-weight:700;font-family:var(--mono);color:#e6edf3;line-height:1">$sc_cnt</div>
+      <div style="font-size:11px;color:#6e7681;margin-top:6px">Installed</div>
+    </div></a>
+
+    <a href="index.cgi?tab=bouncers$qs_filter" style="text-decoration:none">
+    <div style="background:var(--surface);border:1px solid var(--border);
+      border-radius:10px;padding:18px 16px;cursor:pointer;transition:all .15s"
+      onmouseover="this.style.borderColor='rgba(108,99,255,.5)';this.style.background='rgba(108,99,255,0.06)'"
+      onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--surface)'">
+      <div style="font-size:11px;color:#8b949e;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">🔥 Bouncers</div>
+      <div style="font-size:32px;font-weight:700;font-family:var(--mono);color:#e6edf3;line-height:1">@{[scalar @$bouncers]}</div>
+      <div style="font-size:11px;color:#6e7681;margin-top:6px">Remediation</div>
+    </div></a>
+
   </div>
 HTML
 

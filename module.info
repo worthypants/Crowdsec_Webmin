@@ -1,7 +1,7 @@
 name=crowdsec
 desc=CrowdSec Security Engine
 longdesc=Monitor and manage CrowdSec intrusion detection and prevention
-category=security
+category=net
 version=1.0
 os_support=*-linux
 usermin=0
