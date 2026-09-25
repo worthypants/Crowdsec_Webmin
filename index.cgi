@@ -14,12 +14,24 @@ my @test_ranges = get_test_ip_ranges();
 my $exclude_test = exists $in{'exclude_test'}
     ? ($in{'exclude_test'} ? 1 : 0)
     : get_exclude_by_default();
-my $qs_filter    = $exclude_test ? '&exclude_test=1' : '&exclude_test=0';
+
+# ── Time range (applies to alerts + everything derived from them) ────────────
+my %SINCE_LABELS = (
+    '1h'  => 'Last 1 hour',   '24h' => 'Last 24 hours', '3d'  => 'Last 3 days',
+    '7d'  => 'Last 7 days',   '15d' => 'Last 15 days',  '30d' => 'Last 30 days',
+    'all' => 'All time',
+);
+my $since = $in{'since'} || '24h';
+$since = '24h' unless exists $SINCE_LABELS{$since};
+my $since_label = $SINCE_LABELS{$since};
+my $since_query = ($since eq 'all') ? '' : $since;   # what we pass to cscli --since
+
+my $qs_filter = ($exclude_test ? '&exclude_test=1' : '&exclude_test=0') . "&since=$since";
 
 &ui_print_header(undef, "CrowdSec Security Engine", "", undef, 1, 1);
 
 # ── Gather data up-front ──────────────────────────────────────────────────────
-my $alerts_raw = get_alerts_detail('24h');
+my $alerts_raw = get_alerts_detail($since_query);
 # Apply test-IP filter if checkbox is on
 my $alerts = $exclude_test
     ? filter_alerts($alerts_raw, @test_ranges)
@@ -172,8 +184,8 @@ body::before{content:'';position:fixed;inset:0;
   border:1px solid rgba(240,180,41,0.25);padding:2px 8px;border-radius:12px}
 .btn{font-family:var(--sans);font-size:12px;font-weight:600;padding:7px 14px;
   border-radius:7px;border:none;cursor:pointer;transition:all .15s;text-decoration:none;display:inline-flex;align-items:center;gap:6px}
-.btn-primary{background:var(--accent);color:#fff}
-.btn-primary:hover{background:#7c74ff}
+.btn-primary{background:#6c63ff!important;color:#fff!important;border:1px solid #6c63ff!important;text-shadow:none!important;background-image:none!important}
+.btn-primary:hover{background:#7c74ff!important;border-color:#7c74ff!important;color:#fff!important}
 .btn-ghost{background:var(--surface2);color:var(--text2);border:1px solid var(--border)}
 .btn-ghost:hover{border-color:var(--border2);color:var(--text)}
 .btn-sm{padding:5px 10px;font-size:11px}
@@ -307,6 +319,25 @@ body::before{content:'';position:fixed;inset:0;
 .viz-tab.active{background:var(--accent);color:#fff}
 .viz-tab:hover:not(.active){color:var(--text)}
 
+/* ── Time range bar ── */
+.range-bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px}
+.range-btn{font-size:12px;font-weight:600;padding:6px 13px;border-radius:7px;
+  border:1px solid var(--border);background:var(--surface);color:var(--text3);
+  text-decoration:none;transition:all .15s;font-family:var(--sans)}
+.range-btn:hover{border-color:rgba(108,99,255,.5);color:var(--text)}
+.range-btn.active{background:var(--accent);border-color:var(--accent);color:#fff}
+
+/* ── Alert filter bar ── */
+.filter-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.filter-bar select, .filter-bar input[type=text]{background:#0d1117;color:#e6edf3;
+  border:1px solid #2a3450;border-radius:7px;padding:7px 10px;font-size:12px;
+  font-family:var(--sans);outline:none}
+.filter-bar input[type=text]{font-family:var(--mono);min-width:160px}
+.filter-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;
+  background:rgba(108,99,255,.12);border:1px solid rgba(108,99,255,.3);color:var(--accent);
+  border-radius:7px;padding:5px 10px}
+.filter-chip a{color:var(--text3);text-decoration:none;font-weight:700}
+
 /* ── Section divider ── */
 .section-sub{font-size:12px;color:var(--text3);margin-top:2px;font-weight:400}
 
@@ -387,6 +418,9 @@ print <<HTML;
     <a class="sb-item @{[$tab eq 'hub'       ? 'active' : '']}" href="index.cgi?tab=hub$qs_filter">
       <span class="ico">📦</span> Hub
     </a>
+    <a class="sb-item @{[$tab eq 'whitelist' ? 'active' : '']}" href="index.cgi?tab=whitelist$qs_filter">
+      <span class="ico">✅</span> Whitelist
+    </a>
   </div>
   <div class="sb-svc">
     <div class="svc-row">
@@ -405,11 +439,23 @@ HTML
 # ── Main content area ─────────────────────────────────────────────────────────
 print '<div class="main">';
 
+# ── Helper: time-range button row (Alerts + Remediation Metrics) ─────────────
+sub range_bar {
+    my ($for_tab) = @_;
+    my $html = '';
+    for my $s ('1h','24h','3d','7d','15d','30d','all') {
+        my $active = ($s eq $since) ? ' active' : '';
+        my $url    = "index.cgi?tab=$for_tab&exclude_test=" . ($exclude_test ? 1 : 0) . "&since=$s";
+        $html .= qq(<a href="$url" class="range-btn$active">$SINCE_LABELS{$s}</a>);
+    }
+    return qq(<div class="range-bar">$html</div>);
+}
+
 # ── Helper: consistent topbar with filter toggle ──────────────────────────────
 sub render_topbar {
     my ($icon, $title, $subtitle, $refresh_tab) = @_;
-    my $toggle_url  = "index.cgi?tab=$refresh_tab&exclude_test=" . ($exclude_test ? 0 : 1);
-    my $refresh_url = "index.cgi?tab=$refresh_tab" . ($exclude_test ? '&exclude_test=1' : '');
+    my $toggle_url  = "index.cgi?tab=$refresh_tab&exclude_test=" . ($exclude_test ? 0 : 1) . "&since=$since";
+    my $refresh_url = "index.cgi?tab=$refresh_tab" . ($exclude_test ? '&exclude_test=1' : '') . "&since=$since";
     my $active_cls  = $exclude_test ? 'active' : '';
     my $sub_html    = $subtitle ? qq( <span style="font-size:13px;font-weight:400;color:#6e7681">· $subtitle</span>) : '';
     my $badge_html  = '';
@@ -441,6 +487,41 @@ if ($tab eq 'engines') {
 
     print '<div class="content">';
 
+    # ── Health status ────────────────────────────────────────────────────────
+    my $hub_updates = get_hub_updates_count();
+    my @checks = (
+        { label => 'CrowdSec engine running',        ok => ($cs_status eq 'active') },
+        { label => 'Firewall bouncer running',        ok => ($cb_status eq 'active') },
+        { label => 'No recent engine errors',          ok => !$cs_err },
+        { label => 'No recent bouncer errors',         ok => !$cb_err },
+        { label => 'At least one security engine registered', ok => (scalar(@$engines) > 0) },
+        { label => 'At least one bouncer registered',  ok => (scalar(@$bouncers) > 0) },
+        { label => 'Hub items up to date',             ok => ($hub_updates == 0),
+          note => $hub_updates ? "$hub_updates update(s) available" : '' },
+    );
+    my $fail_cnt = scalar grep { !$_->{ok} } @checks;
+    my ($hs_color, $hs_bg, $hs_border, $hs_icon, $hs_text) = $fail_cnt == 0
+        ? ('#3dd68c', 'rgba(61,214,140,.08)',  'rgba(61,214,140,.3)',  '✓', 'All systems healthy')
+        : ('#ff9090', 'rgba(255,92,92,.08)',   'rgba(255,92,92,.3)',   '⚠', "$fail_cnt issue" . ($fail_cnt>1?'s':'') . ' need attention');
+
+    print qq(<div class="card" style="margin-bottom:20px;border-color:$hs_border">
+      <div class="card-header">
+        <div class="card-title">🩺 System Health</div>
+        <span style="font-size:12px;font-weight:700;color:$hs_color;background:$hs_bg;border:1px solid $hs_border;border-radius:7px;padding:4px 10px">$hs_icon $hs_text</span>
+      </div>
+      <div class="card-body" style="padding:14px 20px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px 24px">);
+    for my $c (@checks) {
+        my $col = $c->{ok} ? '#3dd68c' : '#ff9090';
+        my $ico = $c->{ok} ? '✓' : '✕';
+        my $lbl = html_escape($c->{label});
+        my $note = $c->{note} ? qq( <span style="color:#6e7681;font-size:11px">($c->{note})</span>) : '';
+        print qq(<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#c9d1d9">
+          <span style="color:$col;font-weight:700">$ico</span>$lbl$note
+        </div>);
+    }
+    print '</div></div></div>';
+
     # Stat row — use local service status for "active" count, not CAPI isOnline
     my $online  = ($cs_status eq 'active') ? scalar(@$engines) : 0;
     my $sc_cnt  = $hub->{scenarios}   || 0;
@@ -451,12 +532,12 @@ if ($tab eq 'engines') {
   <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:24px">
 
     <a href="index.cgi?tab=alerts$qs_filter" style="text-decoration:none">
-    <div style="background:rgba(108,99,255,0.1);border:1px solid rgba(108,99,255,0.35);
+    <div style="background:var(--surface);border:1px solid var(--border);
       border-radius:10px;padding:18px 16px;cursor:pointer;transition:all .15s"
-      onmouseover="this.style.background='rgba(108,99,255,0.18)';this.style.borderColor='rgba(108,99,255,.6)'"
-      onmouseout="this.style.background='rgba(108,99,255,0.1)';this.style.borderColor='rgba(108,99,255,.35)'">
-      <div style="font-size:11px;color:#a99cff;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">🔔 Alerts · 24h</div>
-      <div style="font-size:32px;font-weight:700;font-family:var(--mono);color:var(--accent);line-height:1">$alert_cnt</div>
+      onmouseover="this.style.borderColor='rgba(108,99,255,.5)';this.style.background='rgba(108,99,255,0.06)'"
+      onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--surface)'">
+      <div style="font-size:11px;color:#8b949e;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">🔔 Alerts · $since</div>
+      <div style="font-size:32px;font-weight:700;font-family:var(--mono);color:#e6edf3;line-height:1">$alert_cnt</div>
       <div style="font-size:11px;color:#6e7681;margin-top:6px">All local detections</div>
     </div></a>
 
@@ -579,7 +660,7 @@ HTML
           <div style="font-family:var(--mono);font-size:12px">$ip</div></div>
         <div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Last Seen</div>
           <div style="font-size:12px;color:var(--text2)">$lu</div></div>
-        <div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Alerts · 24h</div>
+        <div><div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:3px">Alerts · $since</div>
           <div style="font-size:24px;font-weight:700;font-family:var(--mono);color:var(--accent)">$alert_cnt</div></div>
       </div>
       <div style="display:flex;gap:8px">
@@ -643,13 +724,58 @@ elsif ($tab eq 'alerts') {
     my $eng_list_exp = ranked_html($exp_eng,  0);
     my $sc_list_exp  = ranked_html($exp_sc,   0);
 
-print render_topbar("🔔", "Alerts", "Last 24h", "alerts");
+print render_topbar("🔔", "Alerts", $since_label, "alerts");
 print '<div class="content">';
+
+    print range_bar('alerts');
+
+    # ── Alert log filter (Source IP / Source AS / Scenario / Security Engine) ─
+    my %FILTER_FIELDS = (
+        src_ip => 'Source IP', src_as => 'Source AS',
+        scenario => 'Scenario', engine => 'Security Engine',
+    );
+    my $ffield = $in{'ffield'} || '';
+    my $fvalue = $in{'fvalue'} || '';
+    $ffield = '' unless exists $FILTER_FIELDS{$ffield};
+
+    my $field_opts = '';
+    for my $k (sort keys %FILTER_FIELDS) {
+        my $sel = ($k eq $ffield) ? ' selected' : '';
+        $field_opts .= qq(<option value="$k"$sel>$FILTER_FIELDS{$k}</option>);
+    }
+    my $fvalue_esc = html_escape($fvalue);
+    my $base_qs = "tab=alerts&exclude_test=" . ($exclude_test?1:0) . "&since=$since";
+    print <<HTML;
+  <div class="filter-bar">
+    <form method="get" action="index.cgi" style="display:flex;gap:8px;align-items:center">
+      <input type="hidden" name="tab" value="alerts">
+      <input type="hidden" name="exclude_test" value="@{[$exclude_test?1:0]}">
+      <input type="hidden" name="since" value="$since">
+      <select name="ffield"><option value="">+ Filter by…</option>$field_opts</select>
+      <input type="text" name="fvalue" value="$fvalue_esc" placeholder="value contains…">
+      <button type="submit" class="btn btn-ghost btn-sm">Apply</button>
+    </form>
+HTML
+    if ($ffield && $fvalue ne '') {
+        my $lbl = html_escape($FILTER_FIELDS{$ffield});
+        print qq(<span class="filter-chip">$lbl: "$fvalue_esc" <a href="index.cgi?$base_qs">✕</a></span>);
+    }
+    print '</div>';
+
+    # Apply filter to the alert log (visualizer numbers stay unfiltered, showing the full window)
+    my $alerts_log = $alerts;
+    if ($ffield && $fvalue ne '') {
+        my $fv = lc $fvalue;
+        $alerts_log = [ grep {
+            my $val = lc(_alert_field($_, $ffield) // '');
+            index($val, $fv) >= 0;
+        } @$alerts ];
+    }
 
     # Quota-style banner
     print <<HTML;
   <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px">
-    <div class="stat-card accent"><div class="label">Total Alerts · 24h <span style="font-size:9px;opacity:.6">LOCAL</span></div>
+    <div class="stat-card accent"><div class="label">Total Alerts · $since <span style="font-size:9px;opacity:.6">LOCAL</span></div>
       <div class="value">$alert_cnt</div>
       <div class="sub" style="font-size:10px">All local detections · app.crowdsec.net shows fewer (noise cancelling + CAPI quota)</div></div>
     <div class="stat-card"><div class="label">Unique IPs</div>
@@ -710,15 +836,15 @@ HTML
   <div class="card">
     <div class="card-header">
       <div class="card-title">📋 Alert Log</div>
-      <span style="font-size:11px;color:var(--text3)">Showing @{[scalar @$alerts]} results</span>
+      <span style="font-size:11px;color:var(--text3)">Showing @{[scalar @$alerts_log]} results</span>
     </div>
     <div class="card-body no-pad">
 HTML
-    if (@$alerts) {
+    if (@$alerts_log) {
         print '<table class="tbl"><thead><tr>
           <th>When</th><th>Scenario</th><th>Source</th><th>Target</th><th>Decisions</th></tr></thead><tbody>';
         my $shown = 0;
-        for my $a (@$alerts) {
+        for my $a (@$alerts_log) {
             last if $shown++ >= 100;
             my $when    = html_escape($a->{start_at} // '-');
             my $sc      = html_escape($a->{scenario}  // '-');
@@ -742,7 +868,7 @@ HTML
         }
         print '</tbody></table>';
     } else {
-        print '<div class="no-data">✓ No alerts in the last 24 hours</div>';
+        print qq(<div class="no-data">✓ No alerts — $since_label</div>);
     }
     print '</div></div>'; # card
     print '</div>'; # content
@@ -765,23 +891,6 @@ elsif ($tab eq 'decisions') {
 
     print render_topbar("🚫", "Decisions", "", "decisions");
     print '<div class="content">';
-
-    # Explanation banner
-    print <<HTML;
-  <div style="background:rgba(108,99,255,0.07);border:1px solid rgba(108,99,255,0.2);
-    border-radius:10px;padding:16px 20px;margin-bottom:20px;font-size:13px;color:#8b949e;line-height:1.7">
-    <strong style="color:#e6edf3">What are decisions?</strong>
-    When CrowdSec detects an attack it creates a decision — a concrete instruction to ban that IP.
-    Decisions come from two sources:
-    <strong style="color:#a99cff">CAPI</strong> (the global CrowdSec community blocklist, with $capi_cnt shown here — use <code style="font-size:11px;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:3px;color:#e6edf3">cscli decisions list --all</code> for the full 30k+ list)
-    and your <strong style="color:#3dd68c">local engine</strong> ($local_cnt active bans from your own server's detections).
-    <br><br>
-    <strong style="color:#e6edf3">Why are there fewer decisions than alerts?</strong>
-    Alerts are detections — each time an attack pattern is matched.
-    A decision (ban) may expire before you check this page, or multiple alerts from the same IP
-    only create one active decision. Bans are temporary by default (hours to days).
-  </div>
-HTML
 
     # Stat cards
     print <<HTML;
@@ -900,19 +1009,40 @@ elsif ($tab eq 'metrics') {
     my $capi_pct = $total_b > 0 ? sprintf("%.1f", $capi_b_raw / $total_b * 100) : '0.0';
     my $eng_pct  = $total_b > 0 ? sprintf("%.1f", $eng_b_raw  / $total_b * 100) : '0.0';
 
-    # ── Per-day alert bucketing (last 7 days) ─────────────────────────────────
+    # ── Per-day alert bucketing — follows the selected time range ────────────
+    # 1h/24h still show 2 days (today + yesterday) so the chart is never a
+    # single lonely bar; "all" spans from the oldest alert (capped at 90 days).
+    my %RANGE_DAYS = ('1h'=>2, '24h'=>2, '3d'=>3, '7d'=>7, '15d'=>15, '30d'=>30);
+    my $n_days = $RANGE_DAYS{$since};
+    if (!$n_days) {    # all time
+        require Time::Local;
+        my @now = localtime();
+        my $today = Time::Local::timelocal(0,0,12,$now[3],$now[4],$now[5]);
+        my $oldest = $today;
+        for my $a (@$alerts) {
+            if (($a->{start_at} // '') =~ /^(\d{4})-(\d{2})-(\d{2})T/) {
+                my $t = eval { Time::Local::timelocal(0,0,12,$3,$2-1,$1) };
+                $oldest = $t if $t && $t < $oldest;
+            }
+        }
+        $n_days = int(($today - $oldest) / 86400 + 0.5) + 1;   # calendar days, inclusive
+        $n_days = 2  if $n_days < 2;
+        $n_days = 90 if $n_days > 90;
+    }
+    my $alerts_7d = $alerts;   # the page-wide alert set already honours $since
+
     my @day_labels;
     my %day_sc;
     my %all_sc;
     {
-        for my $d (reverse 0..6) {
+        for my $d (reverse 0..($n_days-1)) {
             my @t = localtime(time() - $d * 86400);
             my $lbl = sprintf("%s %02d", (qw/Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec/)[$t[4]], $t[3]);
             push @day_labels, $lbl;
             $day_sc{$lbl} = {};
         }
     }
-    for my $a (@$alerts) {
+    for my $a (@$alerts_7d) {
         my $sc  = $a->{scenario} // 'unknown';
         my $ts  = $a->{start_at} // '';
         my ($mo, $dy) = (0, 0);
@@ -974,14 +1104,10 @@ elsif ($tab eq 'metrics') {
 
     print <<HTML;
 HTML
-print render_topbar("📊", "Remediation Metrics", "", "metrics");
+print render_topbar("📊", "Remediation Metrics", $since_label, "metrics");
 print '<div class="content">';
+print range_bar('metrics');
 print <<HTML;
-  <p style="font-size:12px;color:var(--text3);margin-bottom:24px">
-    See how CrowdSec protects your infrastructure by blocking malicious traffic.
-    Track dropped packets and requests to measure the impact of your security policies.
-  </p>
-
   <!-- ── Distribution of Malicious Intents ── -->
   <div class="section-title">✨ Distribution of Malicious Intents
     <div class="section-sub">Breakdown of attack typology associated with IPs blocked by security engines</div>
@@ -1004,7 +1130,7 @@ print <<HTML;
 
   <!-- ── Malicious Traffic Discarded ── -->
   <div class="section-title">🛡️ Malicious Traffic Discarded
-    <div class="section-sub">Discarded traffic based on remediation component metrics</div>
+    <div class="section-sub">Discarded traffic based on remediation component metrics · cumulative since the bouncer last started (not affected by the time range)</div>
   </div>
   <div class="card" style="margin-bottom:20px">
     <div class="card-body">
@@ -1033,7 +1159,7 @@ print <<HTML;
 
   <!-- ── Projected Resources Saved ── -->
   <div class="section-title">💾 Projected Resources Saved
-    <div class="section-sub">Estimated resource savings from blocklists based on remediation metrics</div>
+    <div class="section-sub">Estimated resource savings from blocklists based on remediation metrics · cumulative since the bouncer last started</div>
   </div>
   <div class="card" style="margin-bottom:20px">
     <div class="card-body">
@@ -1226,7 +1352,8 @@ HTML
 # ─────────────────────────────────────────────────────────────────────────────
 elsif ($tab eq 'hub') {
     my $hub_json = `cscli hub list -o json 2>/dev/null`;
-    my $hub_data = load_json($hub_json) // {};
+    my $hub_data = load_json($hub_json);
+    $hub_data = {} unless ref $hub_data eq 'HASH';
 
     my %hub_items;
     for my $key (qw(scenarios parsers collections postoverflows)) {
@@ -1271,20 +1398,25 @@ HTML
         my $items   = $hub_items{$key};
         my $display = ($key eq 'scenarios') ? 'block' : 'none';
         my $cnt     = scalar @$items;
+        my $active_note = ($key eq 'scenarios')
+            ? qq( <span style="font-size:11px;font-weight:400;color:#6e7681">· "Active" = triggered an alert ($since_label)</span>)
+            : '';
         print <<HTML;
 <div id="hub-panel-$key" style="display:$display">
   <div class="card">
     <div class="card-header">
       <div class="card-title">$ico $lbl
-        <span style="font-size:13px;font-weight:400;color:#6e7681;margin-left:8px">$cnt installed</span>
+        <span style="font-size:13px;font-weight:400;color:#6e7681;margin-left:8px">$cnt installed</span>$active_note
       </div>
     </div>
     <div class="card-body no-pad">
 HTML
+        my $is_sc_tab = ($key eq 'scenarios');
         if (@$items) {
-            print '<table class="tbl"><thead><tr>
-              <th>Name</th><th>Version</th><th>Status</th><th>Description</th>
-            </tr></thead><tbody>';
+            my $active_th = $is_sc_tab ? "<th>Active</th>" : '';
+            print "<table class=\"tbl\"><thead><tr>
+              <th>Name</th><th>Version</th><th>Status</th>$active_th<th>Description</th>
+            </tr></thead><tbody>";
             for my $item (@$items) {
                 my $name   = html_escape($item->{name}        // '-');
                 my $ver    = html_escape($item->{version}     // $item->{local_version} // '');
@@ -1304,10 +1436,18 @@ HTML
                     $badge_html ||= "<span class='tag'>$status</span>";
                 }
                 my $ver_display = $ver || ($is_local ? '<span style="color:#6e7681">local</span>' : '-');
+                my $active_td = '';
+                if ($is_sc_tab) {
+                    my $hits = $sc_counts->{$item->{name}} || 0;
+                    $active_td = $hits
+                        ? "<td><span style='display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#3dd68c'><span style='width:7px;height:7px;border-radius:50%;background:#3dd68c;box-shadow:0 0 5px #3dd68c'></span>Active ($hits)</span></td>"
+                        : "<td><span style='display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#6e7681'><span style='width:7px;height:7px;border-radius:50%;background:#3c4454'></span>Inactive</span></td>";
+                }
                 print "<tr>
                   <td class='mono' style='font-size:12px'>$name</td>
                   <td class='mono' style='font-size:11px'>$ver_display</td>
                   <td style='white-space:nowrap'>$badge_html</td>
+                  $active_td
                   <td style='font-size:11px;color:#8b949e'>$desc</td>
                 </tr>";
             }
@@ -1339,6 +1479,269 @@ function showHub(key, btn) {
   btn.style.background = 'rgba(108,99,255,0.15)';
   btn.style.borderColor = 'rgba(108,99,255,0.5)';
 }
+</script>
+HTML
+    print '</div>'; # content
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB: WHITELIST
+# ─────────────────────────────────────────────────────────────────────────────
+elsif ($tab eq 'whitelist') {
+
+    my $ALLOWLIST_NAME = 'webmin-temp-whitelist';
+
+    # Success/error messages
+    my $msg = '';
+    if ($in{wl_added})   { $msg = qq(<div style="background:rgba(61,214,140,.08);border:1px solid rgba(61,214,140,.25);border-radius:8px;padding:10px 16px;color:#3dd68c;font-size:13px;margin-bottom:16px">✓ Whitelist entry added successfully</div>); }
+    if ($in{wl_deleted}) { $msg = qq(<div style="background:rgba(61,214,140,.08);border:1px solid rgba(61,214,140,.25);border-radius:8px;padding:10px 16px;color:#3dd68c;font-size:13px;margin-bottom:16px">✓ Whitelist entry removed</div>); }
+    if ($in{wl_err})     { my $e = html_escape($in{wl_err}); $msg = qq(<div style="background:rgba(255,92,92,.08);border:1px solid rgba(255,92,92,.25);border-radius:8px;padding:10px 16px;color:#ff9090;font-size:13px;margin-bottom:16px">⚠ $e</div>); }
+
+    print render_topbar("✅", "Whitelist", "Temporary IP allowlist", "whitelist");
+    print '<div class="content">';
+    print $msg;
+
+    print <<HTML;
+  <!-- Add form -->
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-header"><div class="card-title">➕ Add Whitelist Entry</div></div>
+    <div class="card-body">
+      <form method="post" action="action.cgi">
+      <input type="hidden" name="action" value="add_whitelist">
+      <div style="display:flex;gap:12px;align-items:end;flex-wrap:wrap">
+
+        <div style="flex:1 1 260px;min-width:220px">
+          <label style="display:block;font-size:11px;font-weight:600;color:#8b949e;
+            text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">
+            IP Address or CIDR
+          </label>
+          <input type="text" name="wl_ip" placeholder="e.g. 203.0.113.5 or 10.0.0.0/8"
+            required pattern="^\\d{1,3}(\\.\\d{1,3}){3}(/\\d{1,2})?\$"
+            style="width:100%;min-width:200px;background:#0d1117;color:#e6edf3;border:1px solid #2a3450;
+              border-radius:8px;padding:9px 12px;font-family:var(--mono);font-size:13px;
+              outline:none;box-sizing:border-box"
+            onfocus="this.style.borderColor='rgba(108,99,255,.5)'"
+            onblur="this.style.borderColor='#2a3450'">
+        </div>
+
+        <div style="flex:0 0 auto">
+          <label style="display:block;font-size:11px;font-weight:600;color:#8b949e;
+            text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Duration</label>
+          <select name="wl_duration"
+            style="background:#0d1117;color:#e6edf3;border:1px solid #2a3450;
+              border-radius:8px;padding:9px 12px;font-family:var(--sans);font-size:13px;
+              outline:none;cursor:pointer;min-width:140px">
+            <option value="1h">1 hour</option>
+            <option value="4h">4 hours</option>
+            <option value="12h">12 hours</option>
+            <option value="24h" selected>24 hours</option>
+            <option value="48h">2 days</option>
+            <option value="168h">1 week</option>
+            <option value="720h">30 days</option>
+            <option value="custom">Custom...</option>
+          </select>
+        </div>
+
+        <div id="custom-dur-wrap" style="display:none;flex:0 0 auto">
+          <label style="display:block;font-size:11px;font-weight:600;color:#8b949e;
+            text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Custom duration</label>
+          <input type="text" name="wl_custom_duration" placeholder="e.g. 2h30m"
+            style="width:110px;background:#0d1117;color:#e6edf3;border:1px solid #2a3450;
+              border-radius:8px;padding:9px 12px;font-family:var(--mono);font-size:13px;outline:none"
+            onfocus="this.style.borderColor='rgba(108,99,255,.5)'"
+            onblur="this.style.borderColor='#2a3450'">
+        </div>
+
+        <div>
+          <label style="display:block;font-size:11px;font-weight:600;color:#8b949e;
+            text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Reason</label>
+          <input type="text" name="wl_reason" placeholder="Optional note"
+            style="width:160px;background:#0d1117;color:#e6edf3;border:1px solid #2a3450;
+              border-radius:8px;padding:9px 12px;font-family:var(--sans);font-size:13px;outline:none"
+            onfocus="this.style.borderColor='rgba(108,99,255,.5)'"
+            onblur="this.style.borderColor='#2a3450'">
+        </div>
+
+        <div>
+          <label style="display:block;font-size:11px;font-weight:600;color:#8b949e;
+            text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">&nbsp;</label>
+          <button type="submit" class="btn btn-primary" style="padding:9px 20px;white-space:nowrap">
+            ✅ Add to Whitelist
+          </button>
+        </div>
+
+      </div>
+
+      <!-- Scope / service checkboxes -->
+      <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--border)">
+        <label style="display:block;font-size:11px;font-weight:600;color:#8b949e;
+          text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">
+          Apply to
+        </label>
+        <div style="display:flex;gap:20px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+            <input type="checkbox" name="wl_scope" value="crowdsec" checked
+              style="width:16px;height:16px;accent-color:var(--accent)">
+            <span>⚙️ CrowdSec Engine Allowlist</span>
+            <span style="font-size:11px;color:#6e7681">(prevents new bans; the firewall bouncer automatically honors this)</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px">
+            <input type="checkbox" name="wl_scope" value="delete_existing" checked
+              style="width:16px;height:16px;accent-color:var(--accent)">
+            <span>🗑 Delete existing bans for this IP</span>
+          </label>
+        </div>
+      </div>
+      </form>
+    </div>
+  </div>
+HTML
+
+    # ── Source 1: cscli allowlists (CrowdSec >=1.6, the modern mechanism) ──────
+    my $al_inspect = `cscli allowlists inspect \Q$ALLOWLIST_NAME\E -o json 2>&1`;
+    $al_inspect //= '';
+    my @al_current;
+    if ($al_inspect =~ /[\[\{]/) {
+        my $ald = load_json($al_inspect);
+        my $items = [];
+        if (ref $ald eq 'ARRAY') { $items = $ald; }
+        elsif (ref $ald eq 'HASH') {
+            $items = $ald->{items} // $ald->{values} // $ald->{ips} // $ald->{entries} // [];
+        }
+        for my $it (@$items) {
+            next unless ref $it eq 'HASH';
+            push @al_current, {
+                value      => $it->{value} // $it->{ip} // $it->{range} // '-',
+                expiration => $it->{expiration} // $it->{expires_at} // '-',
+                comment    => $it->{comment} // $it->{description} // '-',
+            };
+        }
+    }
+
+    # ── Source 2: legacy decision-based whitelist (older cscli) ────────────────
+    my $wl_json2 = `cscli decisions list -t whitelist -o json 2>/dev/null`;
+    $wl_json2 //= '';
+    my @wl_current;
+    if ($wl_json2 && $wl_json2 !~ /^\s*null\s*$/ && $wl_json2 =~ /\[/) {
+        my $wld = load_json($wl_json2);
+        if (ref $wld eq 'ARRAY') {
+            for my $alert (@$wld) {
+                next unless ref $alert eq 'HASH';
+                for my $d (@{$alert->{decisions} // []}) {
+                    push @wl_current, {
+                        id       => $d->{id}       // '',
+                        value    => $d->{value}    // $alert->{source}{ip} // '-',
+                        duration => $d->{duration} // '-',
+                        origin   => $d->{origin}   // '-',
+                        scenario => $alert->{scenario} // $d->{scenario} // '-',
+                    };
+                }
+            }
+        }
+    }
+
+    my $al_cnt = scalar @al_current;
+    print <<HTML;
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-header">
+      <div class="card-title">✅ Active Whitelist Entries</div>
+      <span style="font-size:11px;color:#6e7681">$al_cnt entries · via cscli allowlists</span>
+    </div>
+    <div class="card-body no-pad">
+HTML
+    if (@al_current) {
+        print '<table class="tbl"><thead><tr>
+          <th>IP / Range</th><th>Expires</th><th>Note</th><th></th>
+        </tr></thead><tbody>';
+        for my $w (@al_current) {
+            my $ip  = html_escape($w->{value}      // '-');
+            my $exp = html_escape($w->{expiration}  // '-');
+            my $nt  = html_escape($w->{comment}     // '');
+            print <<HTML;
+<tr>
+  <td class="mono" style="font-weight:600">$ip</td>
+  <td class="mono" style="color:#3dd68c;font-size:12px">$exp</td>
+  <td style="font-size:11px;color:#6e7681">$nt</td>
+  <td>
+    <form method="post" action="action.cgi" style="display:inline">
+      <input type="hidden" name="action" value="delete_whitelist">
+      <input type="hidden" name="ip" value="$ip">
+      <button class="btn btn-warn btn-sm" type="submit"
+        onclick="return confirm('Remove whitelist entry for $ip?')">🗑 Remove</button>
+    </form>
+  </td>
+</tr>
+HTML
+        }
+        print '</tbody></table>';
+    } else {
+        print '<div class="no-data">No active allowlist entries — all IPs subject to normal detection</div>';
+    }
+    print '</div></div>';
+
+    if (@wl_current) {
+        my $wl_cnt = scalar @wl_current;
+        print <<HTML;
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-header">
+      <div class="card-title">🕘 Legacy Whitelist Decisions</div>
+      <span style="font-size:11px;color:#6e7681">$wl_cnt entries · via cscli decisions --type whitelist</span>
+    </div>
+    <div class="card-body no-pad">
+      <table class="tbl"><thead><tr>
+        <th>IP / Range</th><th>Expires in</th><th>Origin</th><th>Note</th><th></th>
+      </tr></thead><tbody>
+HTML
+        for my $w (@wl_current) {
+            my $ip  = html_escape($w->{value}    // '-');
+            my $dur = html_escape($w->{duration} // '-');
+            my $ori = html_escape($w->{origin}   // '-');
+            my $sc  = html_escape($w->{scenario} // '');
+            my $id  = html_escape($w->{id}       // '');
+            print <<HTML;
+<tr>
+  <td class="mono" style="font-weight:600">$ip</td>
+  <td class="mono" style="color:#3dd68c;font-size:12px">$dur</td>
+  <td style="font-size:12px;color:#8b949e">$ori</td>
+  <td style="font-size:11px;color:#6e7681">$sc</td>
+  <td>
+    <form method="post" action="action.cgi" style="display:inline">
+      <input type="hidden" name="action" value="delete_whitelist">
+      <input type="hidden" name="id" value="$id">
+      <input type="hidden" name="ip" value="$ip">
+      <button class="btn btn-warn btn-sm" type="submit"
+        onclick="return confirm('Remove whitelist entry for $ip?')">🗑 Remove</button>
+    </form>
+  </td>
+</tr>
+HTML
+        }
+        print '</tbody></table></div></div>';
+    }
+
+    # ── Diagnostics: show exactly what the last add/remove attempt ran ─────────
+    my $WL_DEBUG_FILE = '/tmp/crowdsec_webmin_wl_debug.txt';
+    my $dbg_text = '';
+    if (open(my $dfh, '<', $WL_DEBUG_FILE)) {
+        local $/; $dbg_text = <$dfh>; close $dfh;
+    }
+    my $dbg_html = html_escape($dbg_text || '(no whitelist add/remove has been attempted yet this session)');
+    print <<HTML;
+  <details style="margin-top:6px">
+    <summary style="cursor:pointer;font-size:12px;color:#8b949e;padding:6px 0">🔧 Diagnostics: last whitelist command output (click to expand)</summary>
+    <pre style="background:#0d1117;color:#8b949e;border:1px solid #2a3450;border-radius:8px;
+      padding:12px;font-size:11px;line-height:1.6;white-space:pre-wrap;margin-top:8px;max-height:400px;overflow:auto">$dbg_html</pre>
+  </details>
+HTML
+
+    print <<'HTML';
+<script>
+// Show/hide custom duration field
+document.querySelector('select[name="wl_duration"]').addEventListener('change', function() {
+  var wrap = document.getElementById('custom-dur-wrap');
+  wrap.style.display = this.value === 'custom' ? 'block' : 'none';
+  document.querySelector('input[name="wl_custom_duration"]').required = (this.value === 'custom');
+});
 </script>
 HTML
     print '</div>'; # content

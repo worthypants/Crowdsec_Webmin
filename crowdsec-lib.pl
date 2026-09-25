@@ -37,8 +37,10 @@ sub get_service_errors {
 
 # ── Alerts ────────────────────────────────────────────────────────────────────
 sub get_alerts_detail {
-    my ($since) = @_; $since ||= '24h';
-    my $json = `cscli alerts list -o json --since $since 2>/dev/null`;
+    my ($since) = @_;
+    $since = '24h' unless defined $since;
+    my $since_flag = ($since eq '' || $since eq 'all') ? '' : "--since \Q$since\E";
+    my $json = `cscli alerts list -o json --limit 0 $since_flag 2>/dev/null`;   # default limit is 50!
     my $data = load_json($json);
     return ref $data eq 'ARRAY' ? $data : [];
 }
@@ -290,6 +292,24 @@ sub get_hub_counts {
         $counts{$k} = scalar @{$data->{$k}} if ref $data->{$k} eq 'ARRAY';
     }
     return \%counts;
+}
+
+# Count hub items (across all sections) whose installed version is behind the
+# hub's latest version — used by the health-status check on the Engines tab.
+sub get_hub_updates_count {
+    my $json = `cscli hub list -o json 2>/dev/null`;
+    my $data = load_json($json);
+    return 0 unless ref $data eq 'HASH';
+    my $n = 0;
+    for my $k (qw(scenarios parsers collections postoverflows)) {
+        next unless ref $data->{$k} eq 'ARRAY';
+        for my $item (@{$data->{$k}}) {
+            my $ver = $item->{version} // '';
+            my $lv  = $item->{local_version} // '';
+            $n++ if $lv && $ver && $lv ne $ver;
+        }
+    }
+    return $n;
 }
 
 # ── Bouncers ──────────────────────────────────────────────────────────────────
