@@ -343,50 +343,102 @@ sub html_escape {
 
 1;
 
-# ── Pure SVG sparkline (no JS required) ──────────────────────────────────────
+# ── Smooth SVG area chart (no JS required) ───────────────────────────────────
+# Monotone cubic interpolation: curves pass through every data point and never
+# overshoot (so a smoothed line can't dip below zero between two buckets).
+sub _smooth_path {
+    my ($xs, $ys) = @_;
+    my $n = scalar @$xs;
+    return '' if $n < 2;
+    my (@d, @m);
+    for my $i (0..$n-2) {
+        my $dx = ($xs->[$i+1] - $xs->[$i]) || 1;
+        $d[$i] = ($ys->[$i+1] - $ys->[$i]) / $dx;
+    }
+    $m[0] = $d[0]; $m[$n-1] = $d[$n-2];
+    for my $i (1..$n-2) {
+        $m[$i] = ($d[$i-1] * $d[$i] <= 0) ? 0 : 2 / (1/$d[$i-1] + 1/$d[$i]);
+    }
+    my $p = sprintf("M%.1f,%.1f", $xs->[0], $ys->[0]);
+    for my $i (0..$n-2) {
+        my $dx = ($xs->[$i+1] - $xs->[$i]) / 3;
+        $p .= sprintf(" C%.1f,%.1f %.1f,%.1f %.1f,%.1f",
+            $xs->[$i] + $dx,   $ys->[$i]   + $m[$i]   * $dx,
+            $xs->[$i+1] - $dx, $ys->[$i+1] - $m[$i+1] * $dx,
+            $xs->[$i+1],       $ys->[$i+1]);
+    }
+    return $p;
+}
+
+our $_SPARK_SEQ = 0;
 sub svg_sparkline {
-    my ($series1, $series2, $w, $h, $c1, $c2) = @_;
-    $w ||= 200; $h ||= 70;
-    $c1 ||= '#6c63ff'; $c2 ||= '#f5a623';
+    my ($series1, $series2, $w, $h, $meta, $c1, $c2) = @_;
+    $w ||= 300; $h ||= 64;
+    $c1 ||= '#7c74ff'; $c2 ||= '#d9763f';
+    $meta ||= {};
+    my $id = 'spk' . (++$_SPARK_SEQ);
 
     my @all_vals = map { $_->{v} } (@$series1, @$series2);
-    my $maxV = (sort { $b <=> $a } @all_vals)[0] || 1;
+    my $maxV = (sort { $b <=> $a } @all_vals)[0] || 0;
+    my $scale = $maxV || 1;
+    my $n   = scalar @$series1;
+    my $top = 6; my $base = $h - 1;
 
-    sub _polyline {
-        my ($pts, $maxV, $w, $h, $col, $fill) = @_;
-        return '' unless @$pts >= 2;
-        my $n = scalar @$pts;
-        my @coords;
-        for my $i (0..$n-1) {
-            my $x = int($i / ($n-1) * $w);
-            my $y = int($h - ($pts->[$i]{v} / $maxV) * ($h - 8) - 4);
-            push @coords, "$x,$y";
+    my $area = sub {
+        my ($pts, $col, $gid) = @_;
+        return '' unless @$pts >= 2 && grep { $_->{v} > 0 } @$pts;
+        my (@xs, @ys);
+        for my $i (0..$#$pts) {
+            push @xs, $i / $#$pts * $w;
+            push @ys, $base - ($pts->[$i]{v} / $scale) * ($base - $top);
         }
-        my $pts_str = join(' ', @coords);
-        # close path for fill
-        my $fill_pts = $pts_str . " $w,$h 0,$h";
-        return qq(<polygon points="$fill_pts" fill="$fill" opacity="0.15"/>)
-             . qq(<polyline points="$pts_str" fill="none" stroke="$col" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>);
+        my $line = _smooth_path(\@xs, \@ys);
+        return qq(<path d="$line L$w,$h L0,$h Z" fill="url(#$gid)"/>)
+             . qq(<path d="$line" fill="none" stroke="$col" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>);
+    };
+
+    my $defs = '';
+    for my $g ([ "${id}a", $c1 ], [ "${id}b", $c2 ]) {
+        $defs .= qq(<linearGradient id="$g->[0]" x1="0" y1="0" x2="0" y2="1">)
+               . qq(<stop offset="0" stop-color="$g->[1]" stop-opacity="0.32"/>)
+               . qq(<stop offset="1" stop-color="$g->[1]" stop-opacity="0"/></linearGradient>);
     }
 
-    # grid lines
+    # recessive grid: baseline + two faint guides
     my $grid = '';
-    for my $f (0.33, 0.66, 1.0) {
-        my $y = int($h - $f * ($h - 8) - 4);
-        $grid .= qq(<line x1="0" y1="$y" x2="$w" y2="$y" stroke="rgba(42,52,80,0.6)" stroke-width="1"/>);
+    for my $f (0.5, 1.0) {
+        my $y = sprintf("%.1f", $base - $f * ($base - $top));
+        $grid .= qq(<line x1="0" y1="$y" x2="$w" y2="$y" stroke="rgba(139,148,158,0.13)" stroke-width="1" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/>);
+    }
+    $grid .= qq(<line x1="0" y1="$base" x2="$w" y2="$base" stroke="rgba(139,148,158,0.3)" stroke-width="1" vector-effect="non-scaling-stroke"/>);
+
+    my $marks = $area->($series2, $c2, "${id}b") . $area->($series1, $c1, "${id}a");
+
+    # hover: one invisible column per bucket with a native tooltip (no JS)
+    my $hits = '';
+    if ($n >= 2) {
+        my $bw = $w / $n;
+        my ($n1, $n2) = (html_escape($meta->{name1} // ''), html_escape($meta->{name2} // ''));
+        for my $i (0..$n-1) {
+            my $tip = html_escape($series1->[$i]{t} // '');
+            $tip .= "\n$n1: $series1->[$i]{v}" if $n1 ne '';
+            $tip .= "\n$n2: $series2->[$i]{v}" if $n2 ne '' && $series2->[$i];
+            my $x = sprintf("%.1f", $i * $bw);
+            my $bwf = sprintf("%.1f", $bw);
+            $hits .= qq(<rect class="spk-hit" x="$x" y="0" width="$bwf" height="$h"><title>$tip</title></rect>);
+        }
     }
 
-    my $lines  = _polyline($series2, $maxV, $w, $h, $c2, $c2);
-    $lines    .= _polyline($series1, $maxV, $w, $h, $c1, $c1);
-
-    # max label
     my $label = $maxV >= 1000 ? sprintf("%.1fk", $maxV/1000) : "$maxV";
+    my $from  = html_escape($meta->{from} // '');
+    my $to    = html_escape($meta->{to}   // '');
+    my $empty = $maxV ? '' : qq(<div class="spk-empty">no alerts in this period</div>);
 
-    return qq(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 $w $h" )
-         . qq(style="width:100%;height:${h}px;display:block;overflow:hidden">)
-         . qq(<text x="2" y="10" font-size="9" fill="rgba(139,148,158,0.9)" font-family="monospace">$label</text>)
-         . $grid . $lines
-         . qq(</svg>);
+    return qq(<div class="spk">$empty)
+         . qq(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 $w $h" preserveAspectRatio="none" )
+         . qq(style="width:100%;height:${h}px;display:block"><defs>$defs</defs>)
+         . $grid . $marks . $hits
+         . qq(</svg><div class="spk-axis"><span>$from</span><span>peak $label / bucket</span><span>$to</span></div></div>);
 }
 
 # ── CSS stacked bar chart (pure HTML, no JS) ──────────────────────────────────
@@ -414,48 +466,77 @@ sub css_stacked_bars {
         my $ci = 0;
         for my $sc (@$sc_names) {
             my $v = $day_sc->{$day}{$sc} || 0;
-            next unless $v > 0;
-            my $seg_pct = $tot > 0 ? int($v / $tot * 100) : 0;
-            my $col = $colors->[$ci % scalar @$colors];
-            $segments .= qq(<div style="height:${seg_pct}%;background:$col;min-height:1px" title="$sc: $v"></div>);
+            my $col = $colors->[$ci % scalar @$colors];   # colour follows the scenario, not its position
             $ci++;
+            next unless $v > 0;
+            $segments .= qq(<div class="sbar-seg" style="flex:$v 1 0;background:$col;min-height:2px" title="$day\n$sc: $v"></div>);
+            
         }
 
         $bars_html .= qq(<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px">)
                     . qq(<div style="width:100%;flex:1;display:flex;flex-direction:column;justify-content:flex-end">)
-                    . qq(<div style="width:80%;margin:0 auto;height:${bar_pct}%;min-height:${\ ($tot>0?2:0) }px;display:flex;flex-direction:column;justify-content:flex-end;overflow:hidden;border-radius:2px 2px 0 0">)
+                    . qq(<div style="width:80%;margin:0 auto;height:${bar_pct}%;min-height:${\ ($tot>0?2:0) }px;display:flex;flex-direction:column;justify-content:flex-end;gap:2px;overflow:hidden;border-radius:4px 4px 0 0;max-width:34px">)
                     . $segments
                     . qq(</div></div>)
                     . qq(<div style="font-size:8px;color:#6e7681;font-family:monospace;white-space:nowrap;text-align:center">$day</div>)
                     . qq(</div>);
     }
 
-    return qq(<div style="height:${h}px;display:flex;gap:2px;align-items:stretch;padding:4px 2px 0">)
+    return qq(<div style="height:${h}px;display:flex;gap:4px;align-items:stretch;padding:4px 2px 0;border-bottom:0">)
          . $bars_html
          . qq(</div>);
 }
 
 # ── Timeline as Perl arrays (for SVG, no JS needed) ──────────────────────────
+# Buckets run chronologically across the selected time range (oldest → now).
 sub get_timeline_data {
-    my ($alerts, $field) = @_;
+    my ($alerts, $field, $since) = @_;
+    $since ||= '24h';
+    require Time::Local;
+    require POSIX;
+
     my %counts;
     for my $a (@$alerts) { $counts{_alert_field($a, $field)}++; }
-    my @top2 = (sort { $counts{$b} <=> $counts{$a} } keys %counts)[0,1];
+    my @top2 = (sort { $counts{$b} <=> $counts{$a} || $a cmp $b } keys %counts)[0,1];
     $top2[0] //= ''; $top2[1] //= '';
 
-    my (%b1, %b2);
-    for my $h (0..23) { my $l = sprintf("%02d:00",$h); $b1{$l}=0; $b2{$l}=0; }
+    # alert timestamps are UTC ISO-8601
+    my @rows;
     for my $a (@$alerts) {
-        my $key = _alert_field($a, $field);
-        my $ts  = $a->{start_at} // '';
-        my $hr  = ($ts =~ /T(\d{2}):/) ? $1 : 0;
-        my $lbl = sprintf("%02d:00", $hr);
-        $b1{$lbl}++ if $key eq $top2[0];
-        $b2{$lbl}++ if $top2[1] ne '' && $key eq $top2[1];
+        next unless ($a->{start_at} // '') =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/;
+        my $t = eval { Time::Local::timegm($6, $5, $4, $3, $2-1, $1) } or next;
+        push @rows, [$t, _alert_field($a, $field)];
     }
-    my @s1 = map { {t=>$_, v=>$b1{$_}} } sort keys %b1;
-    my @s2 = map { {t=>$_, v=>$b2{$_}} } sort keys %b2;
-    return (\@s1, \@s2);
+
+    my %WIN = ('1h'=>[3600,12], '24h'=>[86400,24], '3d'=>[3*86400,36],
+               '7d'=>[7*86400,28], '15d'=>[15*86400,30], '30d'=>[30*86400,30]);
+    my $now = time();
+    my ($span, $nb);
+    if ($WIN{$since}) { ($span, $nb) = @{$WIN{$since}}; }
+    else {   # all time: from the oldest alert
+        my $oldest = $now - 86400;
+        for (@rows) { $oldest = $_->[0] if $_->[0] < $oldest; }
+        $span = $now - $oldest + 1; $nb = 30;
+    }
+    my $start = $now - $span;
+    my $bsize = $span / $nb;
+    my $fmt   = $span <= 86400 ? '%H:%M' : ($span <= 3*86400 ? '%d %b %H:%M' : '%d %b');
+
+    my (@s1, @s2);
+    for my $i (0..$nb-1) {
+        my $lbl = POSIX::strftime($fmt, localtime($start + $i * $bsize)) . ' – '
+                . POSIX::strftime($fmt, localtime($start + ($i+1) * $bsize));
+        push @s1, {t=>$lbl, v=>0}; push @s2, {t=>$lbl, v=>0};
+    }
+    for my $r (@rows) {
+        my $i = int(($r->[0] - $start) / $bsize);
+        next if $i < 0; $i = $nb-1 if $i >= $nb;
+        $s1[$i]{v}++ if $r->[1] eq $top2[0];
+        $s2[$i]{v}++ if $top2[1] ne '' && $r->[1] eq $top2[1];
+    }
+    my %meta = (name1=>$top2[0], name2=>$top2[1],
+                from=>POSIX::strftime($fmt, localtime($start)), to=>'now');
+    return (\@s1, \@s2, \%meta);
 }
 
 # ── CIDR / IP range filtering ─────────────────────────────────────────────────
@@ -515,7 +596,7 @@ sub filter_alerts {
     return \@out;
 }
 
-# The two test ranges for earth.gnos1s.com
+# Default test ranges (RFC 5737 documentation ranges)
 our @TEST_IP_RANGES = ('198.51.100.0/24', '192.0.2.0/24');
 
 # ── Config via Webmin's native %config (populated by init_config in web-lib.pl) ─

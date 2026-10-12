@@ -31,7 +31,8 @@ if ($action eq 'delete_decision') {
 }
 
 # ── Add whitelist entry ───────────────────────────────────────────────────────
-my $WL_DEBUG_FILE = '/tmp/crowdsec_webmin_wl_debug.txt';
+# Kept in Webmin's per-module config dir (root-only), not world-readable /tmp
+my $WL_DEBUG_FILE = ($module_config_directory || '/etc/webmin/crowdsec') . '/whitelist_debug.txt';
 my $ALLOWLIST_NAME = 'webmin-temp-whitelist';
 
 sub run_debug {
@@ -119,11 +120,13 @@ if ($action eq 'add_whitelist') {
     }
 
     # Save the debug transcript so the Whitelist tab can show exactly what ran
+    my $old_umask = umask(077);
     if (open(my $fh, '>', $WL_DEBUG_FILE)) {
         print $fh join("\n\n", @dbg);
         close $fh;
-        chmod 0644, $WL_DEBUG_FILE;
+        chmod 0600, $WL_DEBUG_FILE;
     }
+    umask($old_umask);
 
     if (@errors) {
         my $err = join(' | ', @errors);
@@ -151,11 +154,13 @@ if ($action eq 'delete_whitelist') {
         run_debug("cscli allowlists remove \Q$ALLOWLIST_NAME\E \Q$ip\E 2>&1", \@dbg);
     }
 
+    my $old_umask = umask(077);
     if (open(my $fh, '>', $WL_DEBUG_FILE)) {
         print $fh join("\n\n", @dbg);
         close $fh;
-        chmod 0644, $WL_DEBUG_FILE;
+        chmod 0600, $WL_DEBUG_FILE;
     }
+    umask($old_umask);
 
     &redirect("index.cgi?tab=whitelist&wl_deleted=1");
     exit 0;

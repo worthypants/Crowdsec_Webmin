@@ -70,15 +70,15 @@ my ($exp_eng) = get_top_n($alerts, 'engine',   999);
 my ($exp_sc)  = get_top_n($alerts, 'scenario', 999);
 
 # Generate SVG sparklines directly in Perl - no JS canvas timing issues
-my ($tl_ip_s1,  $tl_ip_s2)  = get_timeline_data($alerts, 'src_ip');
-my ($tl_as_s1,  $tl_as_s2)  = get_timeline_data($alerts, 'src_as');
-my ($tl_eng_s1, $tl_eng_s2) = get_timeline_data($alerts, 'engine');
-my ($tl_sc_s1,  $tl_sc_s2)  = get_timeline_data($alerts, 'scenario');
+my ($tl_ip_s1, $tl_ip_s2, $tl_ip_m) = get_timeline_data($alerts, 'src_ip', $since);
+my ($tl_as_s1, $tl_as_s2, $tl_as_m) = get_timeline_data($alerts, 'src_as', $since);
+my ($tl_eng_s1, $tl_eng_s2, $tl_eng_m) = get_timeline_data($alerts, 'engine', $since);
+my ($tl_sc_s1, $tl_sc_s2, $tl_sc_m) = get_timeline_data($alerts, 'scenario', $since);
 
-my $svg_ip  = svg_sparkline($tl_ip_s1,  $tl_ip_s2,  300, 80);
-my $svg_as  = svg_sparkline($tl_as_s1,  $tl_as_s2,  300, 80);
-my $svg_eng = svg_sparkline($tl_eng_s1, $tl_eng_s2, 300, 80);
-my $svg_sc  = svg_sparkline($tl_sc_s1,  $tl_sc_s2,  300, 80);
+my $svg_ip  = svg_sparkline($tl_ip_s1, $tl_ip_s2, 300, 64, $tl_ip_m);
+my $svg_as  = svg_sparkline($tl_as_s1, $tl_as_s2, 300, 64, $tl_as_m);
+my $svg_eng = svg_sparkline($tl_eng_s1, $tl_eng_s2, 300, 64, $tl_eng_m);
+my $svg_sc  = svg_sparkline($tl_sc_s1, $tl_sc_s2, 300, 64, $tl_sc_m);
 
 # Engine name/id for tooltip - match console style "Security Engine ...Xkkp"
 my ($eng_name, $eng_id) = ('N/A', 'N/A');
@@ -99,8 +99,6 @@ my @SC_COLORS = ('#6366f1','#f59e0b','#a78bfa','#06b6d4','#ec4899',
 
 # ── CSS + shell ───────────────────────────────────────────────────────────────
 print <<'HTML';
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#0d1117;--surface:#161b27;--surface2:#1c2333;--surface3:#242d3f;
@@ -108,7 +106,7 @@ print <<'HTML';
   --accent:#6c63ff;--accent2:#f5a623;--accent3:#4ecdc4;
   --danger:#ff5c5c;--success:#3dd68c;--warning:#f5a623;--info:#58a6ff;
   --text:#e6edf3;--text2:#8b949e;--text3:#6e7681;
-  --mono:'JetBrains Mono',monospace;--sans:'Inter',sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;--sans:system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
   --radius:10px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
@@ -241,7 +239,14 @@ body::before{content:'';position:fixed;inset:0;
 .viz-card{background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:16px;position:relative}
 .viz-card-title{font-size:12px;font-weight:700;color:var(--accent);margin-bottom:12px;
   display:flex;align-items:center;gap:8px}
-.chart-wrap{height:90px;margin-bottom:12px;width:100%;display:block;overflow:hidden;box-sizing:content-box}
+.chart-wrap{margin-bottom:12px;width:100%;display:block}
+.spk{position:relative}
+.spk-axis{display:flex;justify-content:space-between;font-size:10px;color:#6e7681;margin-top:4px;font-variant-numeric:tabular-nums}
+.spk-empty{position:absolute;left:0;right:0;top:22px;text-align:center;font-size:11px;color:#6e7681}
+.spk-hit{fill:transparent;cursor:crosshair}
+.spk-hit:hover{fill:rgba(255,255,255,.07)}
+.sbar-seg{transition:filter .12s}
+.sbar-seg:hover{filter:brightness(1.25)}
 .chart-wrap canvas{display:block;width:100%;height:90px;box-sizing:content-box}
 .ranked-list{list-style:none}
 .ranked-item{display:flex;align-items:center;gap:9px;padding:7px 0;
@@ -249,8 +254,8 @@ body::before{content:'';position:fixed;inset:0;
 .ranked-item:last-child{border-bottom:none}
 .rank-badge{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;
   justify-content:center;font-family:var(--mono);font-size:9px;font-weight:700;flex-shrink:0}
-.r1{background:rgba(108,99,255,.25);color:var(--accent);border:1px solid rgba(108,99,255,.4)}
-.r2{background:rgba(245,166,35,.2);color:var(--accent2);border:1px solid rgba(245,166,35,.35)}
+.r1{background:rgba(124,116,255,.25);color:#a49dff;border:1px solid rgba(124,116,255,.45)}
+.r2{background:rgba(217,118,63,.2);color:#e8935f;border:1px solid rgba(217,118,63,.4)}
 .r3{background:rgba(139,148,158,.15);color:var(--text3);border:1px solid var(--border)}
 .r4{background:transparent;color:var(--text3);border:1px solid var(--border)}
 .ranked-label{font-family:var(--mono);font-size:11px;flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -587,7 +592,7 @@ HTML
     # Engine cards
     if (@$engines) {
         for my $eng (@$engines) {
-            # Name: cscli machines list gives a short 'name' field (e.g. "qd0kkp")
+            # Name: cscli machines list gives a short 'name' field (e.g. "web01")
             # and a long machineId. Use short name if it exists and is short,
             # otherwise take last 4 chars with "..." prefix like the console does.
             my $short_name = $eng->{name} || '';
@@ -1720,7 +1725,7 @@ HTML
     }
 
     # ── Diagnostics: show exactly what the last add/remove attempt ran ─────────
-    my $WL_DEBUG_FILE = '/tmp/crowdsec_webmin_wl_debug.txt';
+    my $WL_DEBUG_FILE = ($module_config_directory || '/etc/webmin/crowdsec') . '/whitelist_debug.txt';   # root-only
     my $dbg_text = '';
     if (open(my $dfh, '<', $WL_DEBUG_FILE)) {
         local $/; $dbg_text = <$dfh>; close $dfh;
