@@ -324,6 +324,29 @@ body::before{content:'';position:fixed;inset:0;
 .viz-tab.active{background:var(--accent);color:#fff}
 .viz-tab:hover:not(.active){color:var(--text)}
 
+
+/* ── Weekly report ── */
+.wk-hero{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-bottom:28px}
+@media (max-width:800px){.wk-hero{grid-template-columns:1fr}}
+.wk-tile{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px}
+.wk-tile.big{background:linear-gradient(135deg,rgba(124,116,255,.14),rgba(124,116,255,.03));border-color:rgba(124,116,255,.35)}
+.wk-tile-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#8b949e}
+.wk-tile-value{font-size:44px;font-weight:700;color:#e6edf3;line-height:1.1;margin:8px 0 4px;font-variant-numeric:tabular-nums}
+.wk-tile.big .wk-tile-value{font-size:56px}
+.wk-tile-sub{font-size:12px;color:#8b949e}
+.wk-trend{display:inline-block;margin-top:12px;font-size:12px;font-weight:600;color:#c9d1d9;background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:6px;padding:4px 9px}
+.wk-trend.muted{color:#8b949e;font-weight:500}
+.wk-bar-row{display:grid;grid-template-columns:minmax(140px,220px) 1fr 64px;align-items:center;gap:14px;padding:7px 0}
+.wk-bar-lbl{font-size:13px;color:#e6edf3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wk-bar-track{height:10px;background:rgba(255,255,255,.04);border-radius:5px;overflow:hidden}
+.wk-bar{height:100%;background:#7c74ff;border-radius:5px}
+.wk-bar-val{font-size:13px;color:#e6edf3;text-align:right;font-family:var(--mono)}
+.wk-note{font-size:12px;color:#8b949e;line-height:1.6;background:var(--surface);border:1px dashed var(--border2);border-radius:var(--radius);padding:14px 18px}
+.wk-note a{color:#a49dff}
+.wk-msg{border-radius:8px;padding:10px 16px;font-size:13px;margin-bottom:16px}
+.wk-msg.ok{background:rgba(61,214,140,.08);border:1px solid rgba(61,214,140,.25);color:#3dd68c}
+.wk-msg.err{background:rgba(255,92,92,.08);border:1px solid rgba(255,92,92,.25);color:#ff9090}
+
 /* ── Time range bar ── */
 .range-bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px}
 .range-btn{font-size:12px;font-weight:600;padding:6px 13px;border-radius:7px;
@@ -412,6 +435,9 @@ print <<HTML;
     </a>
     <a class="sb-item @{[$tab eq 'metrics'   ? 'active' : '']}" href="index.cgi?tab=metrics$qs_filter">
       <span class="ico">📊</span> Remediation Metrics
+    </a>
+    <a class="sb-item @{[$tab eq 'weekly'    ? 'active' : '']}" href="index.cgi?tab=weekly$qs_filter">
+      <span class="ico">🗓️</span> Weekly Report
     </a>
   </div>
   <div class="sb-section">
@@ -1201,31 +1227,9 @@ print <<HTML;
     </div>
   </div>
 
-  <!-- ── Suggested Blocklists ── -->
-  <div class="section-title">✨ Suggested Blocklists for your organization</div>
-  <div class="bl-grid">
-    <div class="bl-card">
-      <div class="bl-card-ico">📧</div>
-      <div class="bl-card-name">Mail Server Attackers</div>
-      <div style="display:inline-block;background:rgba(61,214,140,.1);color:var(--success);border:1px solid rgba(61,214,140,.2);font-size:10px;padding:2px 7px;border-radius:4px;margin-bottom:8px">↘ -61% alerts</div>
-      <div class="bl-card-desc">Contains IPs targeting mail servers like Exim, Dovecot, and Postfix. Blocking these IPs protects mail server infrastructure.</div>
-      <div class="bl-card-meta"><span>14.5k IPs</span><span>Updated ~6h ago</span></div>
-    </div>
-    <div class="bl-card">
-      <div class="bl-card-ico">🌐</div>
-      <div class="bl-card-name">Firehol greensnow.co list</div>
-      <div style="display:inline-block;background:rgba(61,214,140,.1);color:var(--success);border:1px solid rgba(61,214,140,.2);font-size:10px;padding:2px 7px;border-radius:4px;margin-bottom:8px">↘ -30% alerts</div>
-      <div class="bl-card-desc">GreenSnow harvests IPs from computers worldwide. Monitors: port scans, FTP, IMAP, SMTP, SSH, cPanel bruteforce and more.</div>
-      <div class="bl-card-meta"><span>4.69k IPs</span><span>Updated ~9h ago</span></div>
-    </div>
-    <div class="bl-card">
-      <div class="bl-card-ico">🔍</div>
-      <div class="bl-card-name">Public Internet Scanners</div>
-      <div style="display:inline-block;background:rgba(61,214,140,.1);color:var(--success);border:1px solid rgba(61,214,140,.2);font-size:10px;padding:2px 7px;border-radius:4px;margin-bottom:8px">↘ -8% alerts</div>
-      <div class="bl-card-desc">Contains all IPs in our database that are public internet scanners linked to companies scanning and indexing the internet.</div>
-      <div class="bl-card-meta"><span>11.8k IPs</span><span>Updated ~4h ago</span></div>
-    </div>
-  </div>
+  <!-- ── Blocklists: live data lives on the Weekly Report tab ── -->
+  <div class="wk-note" style="margin-bottom:20px">🛡️ Per-blocklist traffic and premium list recommendations are on the
+    <a href="index.cgi?tab=weekly$qs_filter">Weekly Report</a> tab.</div>
 
   <!-- ── Source breakdown ── -->
   <div class="section-title">🌍 Traffic Sources</div>
@@ -1748,6 +1752,186 @@ document.querySelector('select[name="wl_duration"]').addEventListener('change', 
   document.querySelector('input[name="wl_custom_duration"]').required = (this.value === 'custom');
 });
 </script>
+HTML
+    print '</div>'; # content
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB: WEEKLY REPORT (local version of CrowdSec's weekly security email)
+# ─────────────────────────────────────────────────────────────────────────────
+elsif ($tab eq 'weekly') {
+    require POSIX;
+    my $HIST = ($module_config_directory || '/etc/webmin/crowdsec') . '/history.jsonl';
+    my $CRON = '/etc/cron.d/webmin-crowdsec-snapshot';
+    snap_take($HIST, 900);                       # also record on every visit (max every 15 min)
+    my $rows    = snap_load($HIST);
+    my $now     = time();
+    my $WEEK    = 7 * 86400;
+    my $cron_on = -f $CRON;
+
+    my ($this_w, $cov_this) = snap_delta($rows, $now - $WEEK,   $now);
+    my ($prev_w, $cov_prev) = snap_delta($rows, $now - 2*$WEEK, $now - $WEEK);
+    my $hist_since = @$rows ? POSIX::strftime('%d %b %Y %H:%M', localtime($rows->[0]{ts})) : '';
+
+    my $sum_p = sub { my ($h) = @_; my $t = 0; $t += $h->{$_}{p} || 0 for grep { $_ ne '' } keys %$h; $t };
+    my $prevented      = $sum_p->($this_w);
+    my $prevented_prev = $sum_p->($prev_w);
+    my $have_week      = $cov_this >= 6.5 * 86400;
+    my $have_prev      = $cov_prev >= 6.5 * 86400;
+
+    # Fallback while history builds up: running totals since the bouncer started
+    my $live = snap_read_counters() || {};
+    my $live_total = $sum_p->($live);
+
+    # Local detections: this week vs the week before (needs >7 days retention)
+    my $al14_raw = get_alerts_detail('14d');
+    my $al14     = $exclude_test ? filter_alerts($al14_raw, @test_ranges) : $al14_raw;
+    my ($det_this, $det_prev, $oldest) = (0, 0, $now);
+    require Time::Local;
+    for my $a (@$al14) {
+        next unless ($a->{start_at} // '') =~ /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/;
+        my $t = eval { Time::Local::timegm($6,$5,$4,$3,$2-1,$1) } or next;
+        $oldest = $t if $t < $oldest;
+        if ($t >= $now - $WEEK) { $det_this++ } else { $det_prev++ }
+    }
+    my $have_det_prev = $oldest < $now - 13 * 86400;
+
+    my $fmt_k = sub { my $n = shift // 0;
+        return $n >= 1e6 ? sprintf('%.1fM', $n/1e6) : $n >= 1e3 ? sprintf('%.1fk', $n/1e3) : $n };
+    my $trend = sub {
+        my ($cur, $prev, $ok) = @_;
+        return '<span class="wk-trend muted">no previous week to compare yet</span>' unless $ok;
+        return '<span class="wk-trend muted">no change from previous week</span>' if $cur == $prev;
+        return '<span class="wk-trend">↑ new this week (none the week before)</span>' if !$prev;
+        my $pct = ($cur - $prev) / $prev * 100;
+        my $arr = $pct > 0 ? '↑' : '↓';
+        return sprintf('<span class="wk-trend">%s %.0f%% vs previous week (%s)</span>', $arr, abs($pct), $fmt_k->($prev));
+    };
+
+    my $range_lbl = POSIX::strftime('%B %d', localtime($now - $WEEK)) . ' – ' . POSIX::strftime('%B %d, %Y', localtime($now));
+
+    print render_topbar("🗓️", "Weekly Report", $range_lbl, "weekly");
+    print '<div class="content">';
+    if ($in{wk_ok})  { my $w = $in{wk_ok} eq 'enabled' ? 'Hourly snapshots enabled — the first one was just taken.' : 'Hourly snapshots disabled. Saved history is kept.';
+                       print qq(<div class="wk-msg ok">✓ $w</div>); }
+    if ($in{wk_err}) { print '<div class="wk-msg err">⚠ ' . html_escape($in{wk_err}) . '</div>'; }
+
+    # ── Hero row ──────────────────────────────────────────────────────────────
+    my ($hero_val, $hero_sub);
+    if ($have_week) {
+        $hero_val = $fmt_k->($prevented);
+        $hero_sub = $trend->($prevented, $prevented_prev, $have_prev);
+    } elsif (@$rows >= 2) {
+        my $days = sprintf('%.1f', $cov_this / 86400);
+        $hero_val = $fmt_k->($prevented);
+        $hero_sub = qq(<span class="wk-trend muted">only $days days of history so far — a full week builds up automatically</span>);
+    } else {
+        $hero_val = $fmt_k->($live_total);
+        $hero_sub = '<span class="wk-trend muted">running total since the bouncer last started — weekly figures need snapshot history (see below)</span>';
+    }
+    my $proc   = $this_w->{''}{p} || 0;
+    my $share  = ($have_week || @$rows >= 2) && $proc ? sprintf('%.2f%% of all inbound packets', $prevented / $proc * 100) : '';
+    my $share_html = $share ? qq(<div class="wk-tile-sub">$share</div>) : '';
+    my $det_trend = $trend->($det_this, $det_prev, $have_det_prev);
+    $det_trend = '<span class="wk-trend muted">CrowdSec keeps 7 days of alerts by default, so there is no previous week to compare</span>' unless $have_det_prev;
+    my $det_this_k = $fmt_k->($det_this);
+
+    print <<HTML;
+  <div class="wk-hero">
+    <div class="wk-tile big">
+      <div class="wk-tile-label">Attacks prevented</div>
+      <div class="wk-tile-value">$hero_val</div>
+      <div class="wk-tile-sub">packets dropped by the firewall bouncer</div>
+      $share_html
+      $hero_sub
+    </div>
+    <div class="wk-tile">
+      <div class="wk-tile-label">Attacks detected on this server</div>
+      <div class="wk-tile-value">$det_this_k</div>
+      <div class="wk-tile-sub">alerts raised by your own scenarios</div>
+      $det_trend
+    </div>
+  </div>
+HTML
+
+    # ── Top attack behaviours blocked ─────────────────────────────────────────
+    my $by_reason = get_active_decisions_by_reason();
+    my %beh;
+    for my $r (keys %$by_reason) { $beh{behaviour_label($r)} += $_ for values %{$by_reason->{$r}}; }
+    my @top_beh = (sort { $beh{$b} <=> $beh{$a} || $a cmp $b } keys %beh)[0..4];
+    @top_beh = grep { defined } @top_beh;
+    my $beh_max = @top_beh ? $beh{$top_beh[0]} : 1;
+    my $beh_total = 0; $beh_total += $_ for values %beh;
+
+    print qq(<div class="section-title">🎯 Top Attack Behaviors Blocked
+      <div class="section-sub">IPs currently on your blocklists, by the behaviour they were banned for · @{[ $fmt_k->($beh_total) ]} IPs in total</div></div>
+      <div class="card"><div class="card-body">);
+    if (@top_beh) {
+        for my $b (@top_beh) {
+            my $w = sprintf('%.1f', $beh{$b} / $beh_max * 100);
+            my $lbl = html_escape($b); my $v = $fmt_k->($beh{$b});
+            print qq(<div class="wk-bar-row"><div class="wk-bar-lbl" title="$lbl">$lbl</div>
+              <div class="wk-bar-track"><div class="wk-bar" style="width:$w%"></div></div>
+              <div class="wk-bar-val">$v</div></div>);
+        }
+    } else {
+        print '<div class="no-data">No active decisions reported by cscli metrics</div>';
+    }
+    print '</div></div>';
+
+    # ── Blocklists you receive ────────────────────────────────────────────────
+    my %ips_by_origin;
+    for my $r (keys %$by_reason) { $ips_by_origin{$_} += $by_reason->{$r}{$_} for keys %{$by_reason->{$r}}; }
+    my $traffic = ($have_week || @$rows >= 2) ? $this_w : $live;
+    my $traffic_note = ($have_week || @$rows >= 2) ? 'this week' : 'since bouncer start';
+    my %orig = map { $_ => 1 } (keys %ips_by_origin, grep { $_ ne '' } keys %$traffic);
+    my @origins = sort { ($traffic->{$b}{p}||0) <=> ($traffic->{$a}{p}||0) || $a cmp $b } keys %orig;
+    my $tot_p = 0; $tot_p += $traffic->{$_}{p} || 0 for @origins;
+
+    print qq(<div class="section-title">🛡️ Your Blocklists
+      <div class="section-sub">Lists your server actually receives, and how much traffic each one stopped ($traffic_note)</div></div>
+      <div class="card"><div class="card-body no-pad"><table class="tbl"><thead><tr>
+        <th>Source</th><th style="text-align:right">Active IPs</th><th style="text-align:right">Packets dropped</th><th style="text-align:right">Data dropped</th><th style="text-align:right">Share</th>
+      </tr></thead><tbody>);
+    for my $o (@origins) {
+        my $p = $traffic->{$o}{p} || 0;
+        my $pct = $tot_p ? sprintf('%.1f%%', $p / $tot_p * 100) : '–';
+        my $lbl = html_escape(origin_label($o));
+        print qq(<tr><td>$lbl</td><td class="mono" style="text-align:right">@{[ $fmt_k->($ips_by_origin{$o} || 0) ]}</td>
+          <td class="mono" style="text-align:right">@{[ $fmt_k->($p) ]}</td>
+          <td class="mono" style="text-align:right">@{[ fmt_bytes($traffic->{$o}{b} || 0) ]}</td>
+          <td class="mono" style="text-align:right">$pct</td></tr>);
+    }
+    print '<tr><td colspan="5" class="no-data">No blocklist data from cscli metrics</td></tr>' unless @origins;
+    print '</tbody></table></div></div>';
+
+    print <<HTML;
+  <div class="wk-note">
+    <strong>Premium blocklist recommendations</strong> (e.g. "Mail Server Attackers · ↘ 28% alerts") are only available in the
+    <a href="https://app.crowdsec.net" target="_blank" rel="noopener">CrowdSec Console</a>. CrowdSec calculates them in the cloud by
+    matching your alerts against list contents that are only delivered to subscribers, so they can't be computed on this server.
+    Any blocklist you subscribe to, free or paid, appears in the table above automatically.
+  </div>
+HTML
+
+    # ── History / snapshots ──────────────────────────────────────────────────
+    my $n_rows  = scalar @$rows;
+    my $since_t = $hist_since ? "since $hist_since" : 'none yet';
+    my ($btn_act, $btn_lbl, $btn_cls, $state) = $cron_on
+        ? ('disable_snapshots', 'Disable hourly snapshots', 'btn-ghost', '<span style="color:#3dd68c">● enabled</span> — runs hourly from /etc/cron.d')
+        : ('enable_snapshots',  'Enable hourly snapshots',  'btn-primary', '<span style="color:#f0b429">● off</span> — only recorded when you open this tab');
+    print <<HTML;
+  <div class="card" style="margin-top:20px">
+    <div class="card-header"><div class="card-title">🕒 Snapshot history</div>
+      <span style="font-size:12px;color:#8b949e">$state</span></div>
+    <div class="card-body" style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
+      <div style="font-size:12px;color:#8b949e;max-width:640px">The bouncer only keeps running totals, so this tab saves a copy of them every hour
+        and works out weekly figures from the differences. $n_rows snapshots $since_t; kept for 60 days.
+        Trends appear once two full weeks are recorded.</div>
+      <form method="post" action="action.cgi"><input type="hidden" name="action" value="$btn_act">
+        <button type="submit" class="btn $btn_cls">$btn_lbl</button></form>
+    </div>
+  </div>
 HTML
     print '</div>'; # content
 }

@@ -4,6 +4,7 @@
 require '../web-lib.pl';
 &init_config();
 require '../ui-lib.pl';
+require './snapshot-lib.pl';
 
 our %text;
 &load_language('crowdsec');
@@ -185,6 +186,50 @@ sub parse_bouncer_metrics_by_origin {
         }
     }
     return \%by_origin;
+}
+
+# ── Active blocked IPs by behaviour and origin ───────────────────────────────
+# From the "decisions" section of cscli metrics (an active-decisions gauge):
+#   { "ssh:bruteforce": { "CAPI": { "ban": 9530 } }, ... }
+# Returns { reason => { origin => count } }
+sub get_active_decisions_by_reason {
+    my $json = `cscli metrics show decisions -o json 2>/dev/null`;
+    my $data = load_json($json);
+    return {} unless ref $data eq 'HASH';
+    my $d = ref $data->{decisions} eq 'HASH' ? $data->{decisions} : $data;
+    my %out;
+    for my $reason (keys %$d) {
+        next unless ref $d->{$reason} eq 'HASH';
+        for my $origin (keys %{$d->{$reason}}) {
+            my $acts = $d->{$reason}{$origin};
+            my $n = 0;
+            if (ref $acts eq 'HASH') { $n += $_ || 0 for values %$acts; } else { $n = $acts || 0; }
+            $out{$reason}{$origin} += $n if $n;
+        }
+    }
+    return \%out;
+}
+
+# "pop3/imap:bruteforce" -> "POP3/IMAP Bruteforce"; plain scenario names unchanged
+sub behaviour_label {
+    my ($r) = @_;
+    return $r unless defined $r && $r =~ /^([\w\/-]+):([\w-]+)$/ && $r !~ m{^[\w-]+/[\w-]+$};
+    my ($svc, $kind) = ($1, $2);
+    my %UP = map { $_ => 1 } qw(http https ssh smtp pop3 imap ftp rdp sip vpn dns smb ldap tcp udp);
+    $svc = join('/', map { $UP{lc $_} ? uc $_ : ucfirst $_ } split m{/}, $svc);
+    $kind =~ s/[-_]/ /g;
+    return "$svc " . join(' ', map { ucfirst } split / /, $kind);
+}
+
+# Human name for a decision origin
+sub origin_label {
+    my ($o) = @_;
+    return 'Community Blocklist (CAPI)'   if $o eq 'CAPI';
+    return 'Your security engine'          if $o eq 'crowdsec';
+    return 'Manual bans (cscli)'           if $o eq 'cscli';
+    return 'Console decisions'             if $o eq 'console';
+    return "Blocklist: $1"                 if $o =~ /^lists:(.+)$/;
+    return $o;
 }
 
 # ── Scenario counts ───────────────────────────────────────────────────────────

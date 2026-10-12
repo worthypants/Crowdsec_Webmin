@@ -10,7 +10,8 @@ my $id      = $in{'id'}      // '';
 
 my %ok_svc = ('crowdsec'=>1,'crowdsec-firewall-bouncer'=>1);
 my %ok_act = (start=>1, stop=>1, restart=>1,
-              delete_decision=>1, add_whitelist=>1, delete_whitelist=>1);
+              delete_decision=>1, add_whitelist=>1, delete_whitelist=>1,
+              enable_snapshots=>1, disable_snapshots=>1);
 
 unless ($ok_act{$action}) {
     &redirect("index.cgi?tab=bouncers&err=invalid_action");
@@ -163,6 +164,38 @@ if ($action eq 'delete_whitelist') {
     umask($old_umask);
 
     &redirect("index.cgi?tab=whitelist&wl_deleted=1");
+    exit 0;
+}
+
+# ── Weekly Report: hourly counter snapshots via /etc/cron.d ──────────────────
+my $CRON_FILE = '/etc/cron.d/webmin-crowdsec-snapshot';
+if ($action eq 'enable_snapshots') {
+    require Cwd;
+    my $script  = Cwd::abs_path('snapshot.pl');
+    my $history = ($module_config_directory || '/etc/webmin/crowdsec') . '/history.jsonl';
+    unless ($script && -f $script && $script =~ m{^[\w./-]+$} && $history =~ m{^[\w./-]+$}) {
+        &redirect("index.cgi?tab=weekly&wk_err=Could+not+locate+snapshot.pl");
+        exit 0;
+    }
+    chmod 0755, $script;
+    my $old_umask = umask(022);
+    if (open(my $fh, '>', $CRON_FILE)) {
+        print $fh "# Managed by the CrowdSec Webmin module (Weekly Report tab). Remove there.\n";
+        print $fh "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n";
+        print $fh "7 * * * * root /usr/bin/perl $script $history >/dev/null 2>&1\n";
+        close $fh;
+        umask($old_umask);
+        system("/usr/bin/perl", $script, $history);   # take the first one now
+        &redirect("index.cgi?tab=weekly&wk_ok=enabled");
+    } else {
+        umask($old_umask);
+        &redirect("index.cgi?tab=weekly&wk_err=Could+not+write+$CRON_FILE");
+    }
+    exit 0;
+}
+if ($action eq 'disable_snapshots') {
+    unlink $CRON_FILE;
+    &redirect("index.cgi?tab=weekly&wk_ok=disabled");
     exit 0;
 }
 
